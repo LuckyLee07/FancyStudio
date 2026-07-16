@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+data/state.json
+data/state.json.tmp
+data/generated/*
+!data/generated/.gitkeep
+

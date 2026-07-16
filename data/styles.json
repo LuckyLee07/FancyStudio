@@ -1,0 +1,74 @@
+[
+  {
+    "id": "light-gongbi",
+    "name": "清雅淡彩工笔",
+    "short_name": "淡彩工笔",
+    "description": "细而克制的线条、低饱和矿物色与轻微熟宣纸纹理，适合人物、庭院和含蓄情绪。",
+    "prompt_fragment": "elegant Chinese gongbi illustration, restrained fine-line drawing, subtle xuan paper texture, low-saturation mineral pigments, delicate but not ornate, generous negative space",
+    "palette": ["#e8dfca", "#536e6a", "#253e42", "#a97853", "#c9a96e"],
+    "background": "#e8dfca",
+    "foreground": "#253e42",
+    "accent": "#a97853",
+    "paper": "warm"
+  },
+  {
+    "id": "ink-whitespace",
+    "name": "极简水墨留白",
+    "short_name": "水墨留白",
+    "description": "黑白墨色层次、大面积留白与极少人物，用虚实关系承载山水与孤寂。",
+    "prompt_fragment": "minimal Chinese ink wash painting, expressive dry and wet ink, vast white negative space, sparse composition, subtle rice-paper fibers, poetic and restrained",
+    "palette": ["#eeeae0", "#bebcb4", "#767b78", "#303634", "#111715"],
+    "background": "#eeeae0",
+    "foreground": "#303634",
+    "accent": "#767b78",
+    "paper": "cool"
+  },
+  {
+    "id": "childrens-book",
+    "name": "东方儿童绘本",
+    "short_name": "儿童绘本",
+    "description": "温和造型、清晰叙事和亲近自然的色彩，适合启蒙卡片但避免夸张 Q 版。",
+    "prompt_fragment": "warm East Asian children's picture-book illustration, hand-painted gouache and colored pencil, clear gentle storytelling, friendly natural proportions, tactile paper texture",
+    "palette": ["#f4e4bf", "#ebad68", "#79a88d", "#4e7c88", "#c75f4b"],
+    "background": "#f4e4bf",
+    "foreground": "#4e7c88",
+    "accent": "#c75f4b",
+    "paper": "warm"
+  },
+  {
+    "id": "new-chinese-decorative",
+    "name": "新中式装饰插画",
+    "short_name": "新中式",
+    "description": "平面几何构成、传统纹样节奏和明确的文字安全区，适合海报与诗卡。",
+    "prompt_fragment": "contemporary new-Chinese decorative editorial illustration, refined flat shapes, layered geometric composition, subtle traditional pattern rhythm, premium print design, strong silhouette",
+    "palette": ["#eee4d0", "#b8473d", "#1d4b50", "#d5a94e", "#243333"],
+    "background": "#eee4d0",
+    "foreground": "#1d4b50",
+    "accent": "#b8473d",
+    "paper": "graphic"
+  },
+  {
+    "id": "warm-natural",
+    "name": "温暖手绘自然系",
+    "short_name": "暖调手绘",
+    "description": "可见的手绘笔触、柔和自然光与温暖叙事，适合春景、田园和人物关系。",
+    "prompt_fragment": "warm hand-painted naturalistic illustration, soft visible brushwork, luminous natural light, earthy storytelling palette, quiet cinematic framing, traditional Chinese setting",
+    "palette": ["#ead9b4", "#d58a4b", "#75875d", "#455b4f", "#914d3d"],
+    "background": "#ead9b4",
+    "foreground": "#455b4f",
+    "accent": "#d58a4b",
+    "paper": "warm"
+  },
+  {
+    "id": "moonlit-blue-green",
+    "name": "月夜青绿叙事",
+    "short_name": "月夜青绿",
+    "description": "青绿与月白主导的冷暖叙事，适合夜景、羁旅和思乡，避免滥用巨大月亮。",
+    "prompt_fragment": "moonlit blue-green Chinese narrative illustration, deep mineral blue and malachite green, silver moonlight, subtle warm lantern accents, layered mist, quiet cinematic depth",
+    "palette": ["#d7e4dc", "#6b9c8c", "#2f5962", "#182b42", "#d4a866"],
+    "background": "#182b42",
+    "foreground": "#d7e4dc",
+    "accent": "#d4a866",
+    "paper": "night"
+  }
+]
