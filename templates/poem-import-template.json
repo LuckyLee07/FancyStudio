@@ -1,0 +1,29 @@
+{
+  "schema_version": "poem-import/v1",
+  "records": [
+    {
+      "id": "wang-lu-shan-pu-bu",
+      "title": "望庐山瀑布",
+      "author": "李白",
+      "dynasty": "唐",
+      "lines": [
+        "日照香炉生紫烟",
+        "遥看瀑布挂前川",
+        "飞流直下三千尺",
+        "疑是银河落九天"
+      ],
+      "theme": "山水",
+      "mood": "壮阔、明亮",
+      "imagery": ["香炉峰", "瀑布", "银河"],
+      "notes": "仅填写自有整理或明确授权的现代注释。",
+      "source": {
+        "source_type": "public_domain",
+        "citation": "项目内容团队依据公版底本自行校录",
+        "license": "public-domain-text-self-curated",
+        "verification_status": "verified",
+        "url": "",
+        "verified_at": "2026-07-18"
+      }
+    }
+  ]
+}

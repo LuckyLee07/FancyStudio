@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tang-poem-studio.local/schemas/poem-import-v1.json",
+  "title": "PoemImportDocument v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "records"],
+  "properties": {
+    "schema_version": {"const": "poem-import/v1"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "author", "dynasty", "lines", "source"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9-]{3,80}$"},
+          "title": {"type": "string", "minLength": 1, "maxLength": 120},
+          "author": {"type": "string", "minLength": 1, "maxLength": 80},
+          "dynasty": {"type": "string", "minLength": 1, "maxLength": 20},
+          "lines": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+          "theme": {"type": "string", "maxLength": 80},
+          "mood": {"type": "string", "maxLength": 200},
+          "imagery": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+          "notes": {"type": "string", "maxLength": 2000},
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_type", "citation", "license", "verification_status"],
+            "properties": {
+              "source_type": {"enum": ["public_domain", "self_curated", "licensed", "academic_reference", "unknown"]},
+              "citation": {"type": "string", "maxLength": 500},
+              "license": {"type": "string", "maxLength": 120},
+              "verification_status": {"enum": ["unverified", "verified", "restricted"]},
+              "url": {"type": "string", "maxLength": 500},
+              "verified_at": {"type": "string", "maxLength": 30}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"verification_status": {"const": "verified"}}},
+                "then": {
+                  "required": ["verified_at"],
+                  "properties": {
+                    "source_type": {"not": {"const": "unknown"}},
+                    "citation": {"minLength": 1},
+                    "license": {"minLength": 1},
+                    "verified_at": {"type": "string", "format": "date"}
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

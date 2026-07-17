@@ -619,16 +619,28 @@
         </header>
         <div class="dialog-body">
           <div class="import-guidance">
-            <strong>先预检，再写入</strong>
-            <p>支持 JSON 数组。每条记录至少包含 id、title、author、lines；建议同时提供 source、theme、mood 和 imagery。</p>
+            <strong>按版本化模板导入，先预检，再写入</strong>
+            <p>支持 JSON 与 CSV。每首诗必须有稳定 ID、正文和结构化来源；来源未核验或许可不明确时可以暂存，但不能通过内容审核或进入交付。</p>
+            <div class="import-template-actions">
+              <a class="secondary-button" href="/api/templates/poem-import?format=json" download>下载 JSON 模板</a>
+              <a class="secondary-button" href="/api/templates/poem-import?format=csv" download>下载 CSV 模板</a>
+              <a class="text-link" href="/api/schemas/poem-import" target="_blank" rel="noreferrer">查看字段契约</a>
+            </div>
           </div>
+          <label>
+            <span>文件格式</span>
+            <select class="dialog-input" id="import-format">
+              <option value="json">JSON · poem-import/v1</option>
+              <option value="csv">CSV · UTF-8</option>
+            </select>
+          </label>
           <label class="file-field">
-            <span>选择 JSON 文件</span>
-            <input id="import-file" type="file" accept="application/json,.json" />
+            <span>选择 JSON 或 CSV 文件</span>
+            <input id="import-file" type="file" accept="application/json,text/csv,.json,.csv" />
           </label>
           <label>
-            <span>或粘贴 JSON 数组</span>
-            <textarea id="import-json" rows="10" placeholder='[{"id":"wang-lu-shan-pu-bu","title":"望庐山瀑布","author":"李白","lines":["日照香炉生紫烟"],"source":"自有整理"}]'></textarea>
+            <span>或粘贴文件内容</span>
+            <textarea id="import-json" rows="10" placeholder='{"schema_version":"poem-import/v1","records":[{"id":"wang-lu-shan-pu-bu","title":"望庐山瀑布","author":"李白","lines":["日照香炉生紫烟"],"source":{"source_type":"public_domain","citation":"底本与校勘说明","license":"Public Domain","verification_status":"verified","verified_at":"2026-07-18"}}]}'></textarea>
           </label>
           <div class="import-result" id="import-result" hidden></div>
         </div>
@@ -640,6 +652,30 @@
             <button class="primary-button" id="commit-import-button" type="button" disabled>确认导入</button>
           </div>
         </footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="source-dialog">
+      <form class="dialog-shell" id="source-form">
+        <header>
+          <div><p class="eyebrow">SOURCE PROVENANCE</p><h2 id="source-dialog-title">核验诗词来源</h2></div>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button>
+        </header>
+        <input type="hidden" name="poem_id" />
+        <div class="dialog-body form-stack">
+          <div class="import-guidance"><strong>来源版本不可覆盖</strong><p>每次保存都会新增来源版本。只有“已核验”且许可明确可用的来源，才能通过内容审核并进入最终交付。</p></div>
+          <div class="dialog-columns">
+            <label><span>来源类型</span><select class="dialog-input" name="source_type" required><option value="public_domain">公共领域</option><option value="self_curated">自有整理</option><option value="licensed">已授权</option><option value="academic_reference">学术参考</option><option value="unknown">待确认</option></select></label>
+            <label><span>核验状态</span><select class="dialog-input" name="verification_status" required><option value="verified">已核验</option><option value="unverified">待核验</option><option value="restricted">许可受限</option></select></label>
+          </div>
+          <label><span>来源引文 / 底本说明</span><textarea class="dialog-textarea" name="citation" rows="4" maxlength="500" required></textarea></label>
+          <div class="dialog-columns">
+            <label><span>许可</span><input class="dialog-input" name="license" maxlength="120" placeholder="Public Domain / internal-demo-use" required /></label>
+            <label><span>核验日期</span><input class="dialog-input" name="verified_at" type="date" /></label>
+          </div>
+          <label><span>来源链接（可选）</span><input class="dialog-input" name="url" type="url" maxlength="500" placeholder="https://…" /></label>
+        </div>
+        <footer><span>生产中的诗词不能把来源降级为待核验或许可受限。</span><div><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit" data-role-allow="content_editor,producer,system_admin">保存来源版本</button></div></footer>
       </form>
     </dialog>
 

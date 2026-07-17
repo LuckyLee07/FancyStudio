@@ -24,7 +24,10 @@
 - 8 个一级工作区：总览、AI 指令、需求板、方向板、队列、审片、成品、资源；
 - 五类当前岗位视图，按内容编辑、美术指导、AI 操作员、制片人与系统管理员收敛主操作，并将所选岗位原样交给服务端角色门禁；
 - SQLite 生产数据层和可重复 Schema Migration；
-- 诗词、内容版本、指令版本、需求卡、方向方案与审计事件；
+- 诗词、不可变来源版本、内容版本、指令版本、需求卡、方向方案与审计事件；
+- `poem-import/v1` CSV / JSON 导入合同、可下载模板与严格 Schema 校验，兼容旧 JSON 数组但不会把旧来源文本误判为已核验；
+- 诗词来源、授权和核验状态生产门禁：未核验、受限或缺少授权信息的数据不能通过内容审批或进入最终交付；
+- 面向 300 首目标的数据质量报告，持续统计来源、授权、正文、主题、情绪、意象覆盖率以及阻塞问题；
 - AI 指令草稿、角色化发布、历史退役与需求版本冻结；
 - 指令版本克隆、与当前发布版逐字段比较，以及带原因的草稿作废；
 - Art Bible v1：统一管理色彩、线条、人物比例、空间、材质、文字禁区、历史边界与风格发布政策；
@@ -144,6 +147,7 @@ AI_PROVIDER=openai python3 server.py
 FancyStudio/
 ├─ server.py                  HTTP API、旧图像生成链路与静态文件服务
 ├─ sop_store.py               SQLite 生产领域、门禁、队列、预算与审计
+├─ poem_import_schema.py      诗词 CSV / JSON 导入合同、来源规范化与校验
 ├─ prompt_compiler.py         六段式 Prompt 编译、Provider 模板、来源版本与哈希
 ├─ requirement_schema.py      RequirementCard v1 校验、一次修复与置信度规则
 ├─ direction_schema.py        DirectionProposal v1、事实分层与三方向差异门禁
@@ -151,12 +155,16 @@ FancyStudio/
 ├─ review_schema.py           ReviewResult v1、QCPolicy v1 与确定性评分门禁
 ├─ visual_reviewer.py         多模态视觉审查适配器与安全降级
 ├─ schemas/
+│  ├─ poem-import.schema.json       诗词导入与来源证明 JSON Schema
 │  ├─ requirement-card.schema.json  需求卡 JSON Schema
 │  ├─ direction-proposal.schema.json 画面方向 JSON Schema
 │  ├─ art-bible.schema.json         全局视觉圣经 JSON Schema
 │  ├─ style-pack.schema.json        风格包 JSON Schema
 │  ├─ review-result.schema.json     视觉审查结果 JSON Schema
 │  └─ qc-policy.schema.json         质检政策 JSON Schema
+├─ templates/
+│  ├─ poem-import-template.json     推荐 JSON 导入模板
+│  └─ poem-import-template.csv      UTF-8 CSV 导入模板
 ├─ qc_engine.py               离线技术质检、格式解析与相似指纹
 ├─ backup_service.py          数据库与资产备份、校验和安全恢复
 ├─ backup_tool.py             离线备份 / 列表 / 校验 / 恢复命令
@@ -177,6 +185,7 @@ FancyStudio/
 │  └─ backups/                数据库和资产备份包
 └─ tests/
    ├─ test_sop_store.py       状态、门禁、批次、预算、恢复与审计
+   ├─ test_poem_import_schema.py 导入合同、模板、CSV 与来源核验
    ├─ test_qc_engine.py       文件、规格、文字和相似指纹质检
    ├─ test_performance.py     300 首分页与 1000 任务批次性能门禁
    ├─ test_prompt_compiler.py 确定性编译、来源版本与快照哈希
@@ -217,6 +226,8 @@ python3 -m unittest discover -s tests -v
 测试覆盖：
 
 - SQLite 初始化与重启恢复；
+- CSV / JSON 诗词导入模板、合同校验、来源不可变版本和防降级门禁；
+- 300 首数据质量报告、覆盖率统计与内容审批 / 最终交付来源门禁；
 - 需求生成、修订、批准和退回；
 - RequirementCard Schema、一次修复、缓存命中、批量部分失败、异常下钻和恢复；
 - 需求批量决策、锁字段重算和旧方向失效；
@@ -247,7 +258,7 @@ python3 -m unittest discover -s tests -v
 
 ## 当前边界
 
-- 当前种子数据为 12 首基准诗，尚未导入完整 300 首生产数据；
+- 当前种子数据为 12 首基准诗；系统已能报告其相对 300 首目标的数量缺口和逐条质量问题，但完整 300 首生产数据仍需内容团队清洗、核验并导入；
 - Requirement 与 Direction 当前使用可测试的结构化本地策划器，真实文本模型适配将在后续接入；
 - 风格基准流程已强制样本数量与人工评分门槛；语义风格匹配、跑题和构图多样性仍需视觉模型与人工标注集校准；
 - 真实图像 Provider 已接入多模态语义、历史和美术风险审查；其结果是生产筛查而非学术认证，栅格文字 / 品牌识别和阈值仍需至少 100 张人工标注图校准；

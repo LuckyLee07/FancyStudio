@@ -166,6 +166,36 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("qc-score-grid", styles)
         self.assertIn("qc-calibration-panel", styles)
 
+    def test_poem_import_templates_quality_report_and_source_gate_are_visible(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            "import-format",
+            "import-file",
+            "source-dialog",
+            "source-form",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("/api/templates/poem-import?format=json", html)
+        self.assertIn("/api/templates/poem-import?format=csv", html)
+        self.assertIn('value="csv"', html)
+        for field in (
+            "source_type",
+            "citation",
+            "license",
+            "verification_status",
+            "verified_at",
+        ):
+            self.assertIn(f'name="{field}"', html)
+        self.assertIn("data_quality", script)
+        self.assertIn("poem_import_schema", script)
+        self.assertIn("submitPoemSource", script)
+        self.assertIn("source_update", script)
+        self.assertIn("data-quality-panel", styles)
+        self.assertIn("poem-source-summary", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

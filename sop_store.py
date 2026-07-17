@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from poem_import_schema import POEM_IMPORT_SCHEMA_VERSION, normalize_source
 from qc_engine import EXPECTED_RATIOS, hamming_distance
 from review_schema import QC_POLICY_SCHEMA_VERSION, validate_qc_policy
 from prompt_compiler import PromptCompileError, compile_generation_prompt
@@ -1102,6 +1103,40 @@ class SopStore:
                     COMMIT;
                     """
                 )
+            if 12 not in applied:
+                connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+
+                    CREATE TABLE poem_sources (
+                        id TEXT PRIMARY KEY,
+                        poem_id TEXT NOT NULL REFERENCES poems(id),
+                        version INTEGER NOT NULL,
+                        is_current INTEGER NOT NULL DEFAULT 1,
+                        source_type TEXT NOT NULL,
+                        citation TEXT NOT NULL,
+                        license TEXT NOT NULL,
+                        source_url TEXT NOT NULL DEFAULT '',
+                        verification_status TEXT NOT NULL,
+                        verified_at TEXT,
+                        verified_by TEXT NOT NULL DEFAULT '',
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(poem_id, version)
+                    );
+
+                    CREATE INDEX idx_poem_sources_current
+                    ON poem_sources(poem_id, is_current, version);
+
+                    CREATE INDEX idx_poem_sources_verification
+                    ON poem_sources(verification_status, license);
+
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (12, CURRENT_TIMESTAMP);
+
+                    COMMIT;
+                    """
+                )
 
     def _recover_interrupted_work(self) -> None:
         """Make crash recovery explicit without automatically repeating billed work."""
@@ -1281,6 +1316,25 @@ class SopStore:
                             poem.get("visual_brief", ""),
                             poem.get("source", "项目内置基准诗数据"),
                             "seed",
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO poem_sources(
+                            id, poem_id, version, is_current, source_type,
+                            citation, license, source_url,
+                            verification_status, verified_at, verified_by,
+                            created_by, created_at
+                        ) VALUES (?, ?, 1, 1, 'self_curated', ?,
+                                  'internal-demo-use', '', 'verified', ?,
+                                  'seed', 'seed', ?)
+                        """,
+                        (
+                            f"poemsource_{poem['id']}_v1",
+                            poem["id"],
+                            poem.get("source", "项目内置基准诗数据"),
+                            now[:10],
                             now,
                         ),
                     )
@@ -1592,6 +1646,63 @@ class SopStore:
             item.pop("requirement_version", None)
             item.pop("requirement_content", None)
         return item
+
+    @staticmethod
+    def _poem_source_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["is_current"] = bool(item.get("is_current"))
+        return item
+
+    def _insert_poem_source_locked(
+        self,
+        connection: sqlite3.Connection,
+        poem_id: str,
+        source: dict[str, Any],
+        *,
+        actor: dict[str, Any] | None,
+        now: str,
+    ) -> dict[str, Any]:
+        actor_id, _ = self._actor(actor)
+        version = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM poem_sources WHERE poem_id = ?",
+                (poem_id,),
+            ).fetchone()["version"]
+        )
+        connection.execute(
+            "UPDATE poem_sources SET is_current = 0 WHERE poem_id = ? AND is_current = 1",
+            (poem_id,),
+        )
+        source_id = _new_id("poemsource")
+        connection.execute(
+            """
+            INSERT INTO poem_sources(
+                id, poem_id, version, is_current, source_type, citation,
+                license, source_url, verification_status, verified_at,
+                verified_by, created_by, created_at
+            ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                poem_id,
+                version,
+                str(source.get("source_type") or "unknown"),
+                str(source.get("citation") or ""),
+                str(source.get("license") or ""),
+                str(source.get("url") or ""),
+                str(source.get("verification_status") or "unverified"),
+                str(source.get("verified_at") or "") or None,
+                actor_id
+                if source.get("verification_status") == "verified"
+                else "",
+                actor_id,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM poem_sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        return self._poem_source_dict(row)
 
     @staticmethod
     def _requirement_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -2227,7 +2338,11 @@ class SopStore:
             lines = [str(item).strip()[:200] for item in lines if str(item).strip()]
         else:
             lines = []
-        source = str(record.get("source") or "").strip()[:500]
+        source_metadata, source_errors, source_warnings = normalize_source(
+            record.get("source")
+        )
+        errors.extend(source_errors)
+        warnings.extend(source_warnings)
         if not poem_id:
             errors.append("缺少稳定 id。")
         elif not re.fullmatch(r"[a-z0-9-]{3,80}", poem_id):
@@ -2238,8 +2353,6 @@ class SopStore:
             errors.append("缺少作者。")
         if not lines:
             errors.append("正文不能为空。")
-        if not source:
-            warnings.append("缺少来源，导入后必须补录并完成内容复核。")
         imagery = record.get("imagery") or []
         if not isinstance(imagery, list):
             imagery = []
@@ -2253,7 +2366,8 @@ class SopStore:
             "theme": str(record.get("theme") or "").strip()[:80],
             "mood": str(record.get("mood") or "").strip()[:200],
             "imagery": [str(item).strip()[:80] for item in imagery if str(item).strip()][:20],
-            "source": source,
+            "source": source_metadata["citation"],
+            "source_metadata": source_metadata,
             "notes": str(record.get("notes") or record.get("visual_brief") or "").strip()[:2000],
         }
         return normalized, errors, warnings
@@ -2298,7 +2412,22 @@ class SopStore:
             placeholders = ",".join("?" for _ in valid_ids)
             with self._connect() as connection:
                 rows = connection.execute(
-                    f"SELECT * FROM poems WHERE id IN ({placeholders})",
+                    f"""
+                    SELECT p.*,
+                           s.source_type AS current_source_type,
+                           s.citation AS current_source_citation,
+                           s.license AS current_source_license,
+                           s.source_url AS current_source_url,
+                           s.verification_status AS current_source_status,
+                           s.verified_at AS current_source_verified_at
+                    FROM poems p
+                    LEFT JOIN poem_sources s ON s.id = (
+                        SELECT s2.id FROM poem_sources s2
+                        WHERE s2.poem_id = p.id AND s2.is_current = 1
+                        ORDER BY s2.version DESC LIMIT 1
+                    )
+                    WHERE p.id IN ({placeholders})
+                    """,
                     valid_ids,
                 ).fetchall()
             existing = {row["id"]: row for row in rows}
@@ -2307,6 +2436,7 @@ class SopStore:
             "total": len(records),
             "new": 0,
             "unchanged": 0,
+            "source_update": 0,
             "conflict": 0,
             "invalid": 0,
             "warnings": 0,
@@ -2327,7 +2457,31 @@ class SopStore:
                     "lines": _decode(current["lines_json"], []) == record["lines"],
                 }
                 conflict_fields = [key for key, matches in comparisons.items() if not matches]
-                status = "conflict" if conflict_fields else "unchanged"
+                if conflict_fields:
+                    status = "conflict"
+                else:
+                    source = record["source_metadata"]
+                    current_source = {
+                        "source_type": current["current_source_type"] or "unknown",
+                        "citation": current["current_source_citation"] or "",
+                        "license": current["current_source_license"] or "",
+                        "url": current["current_source_url"] or "",
+                        "verification_status": current["current_source_status"]
+                        or "unverified",
+                        "verified_at": current["current_source_verified_at"] or "",
+                    }
+                    if source == current_source:
+                        status = "unchanged"
+                    elif (
+                        current["status"] not in {"imported", "content_review"}
+                        and source["verification_status"] != "verified"
+                    ):
+                        errors.append(
+                            "已进入生产的诗词不能通过批量导入把来源降级为未核验或受限。"
+                        )
+                        status = "invalid"
+                    else:
+                        status = "source_update"
             counts[status] += 1
             if warnings:
                 counts["warnings"] += 1
@@ -2349,6 +2503,38 @@ class SopStore:
             "can_commit": counts["invalid"] == 0 and counts["conflict"] == 0,
             "counts": counts,
             "items": items,
+            "quality": {
+                "structured_source_count": sum(
+                    bool((item.get("normalized") or {}).get("source_metadata", {}).get("citation"))
+                    for item in items
+                ),
+                "verified_source_count": sum(
+                    (item.get("normalized") or {})
+                    .get("source_metadata", {})
+                    .get("verification_status")
+                    == "verified"
+                    for item in items
+                ),
+                "license_ready_count": sum(
+                    bool(
+                        (item.get("normalized") or {})
+                        .get("source_metadata", {})
+                        .get("license")
+                    )
+                    and (item.get("normalized") or {})
+                    .get("source_metadata", {})
+                    .get("license")
+                    not in {"unknown", "needs-review", "restricted"}
+                    for item in items
+                ),
+                "metadata_complete_count": sum(
+                    all(
+                        bool((item.get("normalized") or {}).get(field))
+                        for field in ("theme", "mood", "imagery")
+                    )
+                    for item in items
+                ),
+            },
         }
 
     def import_poems(
@@ -2366,6 +2552,9 @@ class SopStore:
                 status=409,
             )
         new_items = [item for item in preview["items"] if item["status"] == "new"]
+        source_updates = [
+            item for item in preview["items"] if item["status"] == "source_update"
+        ]
         now = utc_now()
         with self.lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2413,6 +2602,13 @@ class SopStore:
                             now,
                         ),
                     )
+                    self._insert_poem_source_locked(
+                        connection,
+                        poem["id"],
+                        poem["source_metadata"],
+                        actor=actor,
+                        now=now,
+                    )
                     self._audit(
                         connection,
                         actor=actor,
@@ -2425,6 +2621,42 @@ class SopStore:
                             "status": "content_review",
                         },
                     )
+                for item in source_updates:
+                    poem = item["normalized"]
+                    before = connection.execute(
+                        "SELECT * FROM poem_sources WHERE poem_id = ? AND is_current = 1 ORDER BY version DESC LIMIT 1",
+                        (poem["id"],),
+                    ).fetchone()
+                    source = self._insert_poem_source_locked(
+                        connection,
+                        poem["id"],
+                        poem["source_metadata"],
+                        actor=actor,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE poems SET source = ?, updated_at = ? WHERE id = ?",
+                        (poem["source"], now, poem["id"]),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE content_versions SET source = ?
+                        WHERE id = (
+                            SELECT id FROM content_versions
+                            WHERE poem_id = ? ORDER BY version DESC LIMIT 1
+                        )
+                        """,
+                        (poem["source"], poem["id"]),
+                    )
+                    self._audit(
+                        connection,
+                        actor=actor,
+                        action="poem.source_updated",
+                        target_type="poem",
+                        target_id=poem["id"],
+                        before=self._poem_source_dict(before) if before else None,
+                        after=source,
+                    )
                 connection.execute(
                     "UPDATE production_projects SET updated_at = ? WHERE id = ?",
                     (now, project_id),
@@ -2436,9 +2668,295 @@ class SopStore:
         return {
             "project_id": project_id,
             "imported": len(new_items),
+            "source_updated": len(source_updates),
             "unchanged": preview["counts"]["unchanged"],
             "warnings": preview["counts"]["warnings"],
             "items": preview["items"],
+        }
+
+    def poem_sources(self, poem_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            poem = connection.execute(
+                "SELECT id FROM poems WHERE id = ?", (str(poem_id),)
+            ).fetchone()
+            if not poem:
+                raise WorkflowError("POEM_NOT_FOUND", "诗词不存在。", status=404)
+            rows = connection.execute(
+                "SELECT * FROM poem_sources WHERE poem_id = ? ORDER BY version DESC",
+                (str(poem_id),),
+            ).fetchall()
+        return [self._poem_source_dict(row) for row in rows]
+
+    def update_poem_source(
+        self,
+        poem_id: str,
+        source_payload: Any,
+        *,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        actor_id, actor_role = self._actor(actor)
+        if actor_role not in {"content_editor", "producer", "system_admin"}:
+            raise WorkflowError(
+                "SOURCE_ROLE_REQUIRED",
+                "只有内容编辑、制片人或系统管理员可以更新来源。",
+                status=403,
+            )
+        if not isinstance(source_payload, dict):
+            raise WorkflowError("SOURCE_PAYLOAD_REQUIRED", "来源必须是结构化对象。")
+        source, errors, warnings = normalize_source(source_payload)
+        if errors:
+            raise WorkflowError("SOURCE_INVALID", "；".join(errors))
+        if not source["citation"]:
+            raise WorkflowError("SOURCE_CITATION_REQUIRED", "来源引文不能为空。")
+        if not source["license"]:
+            raise WorkflowError("SOURCE_LICENSE_REQUIRED", "来源许可不能为空。")
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                poem = connection.execute(
+                    "SELECT * FROM poems WHERE id = ?", (str(poem_id),)
+                ).fetchone()
+                if not poem:
+                    raise WorkflowError(
+                        "POEM_NOT_FOUND", "诗词不存在。", status=404
+                    )
+                if (
+                    poem["status"] not in {"imported", "content_review"}
+                    and source["verification_status"] != "verified"
+                ):
+                    raise WorkflowError(
+                        "SOURCE_DOWNGRADE_BLOCKED",
+                        "已进入生产的诗词不能把当前来源降级为未核验或受限。",
+                        status=409,
+                    )
+                before = connection.execute(
+                    "SELECT * FROM poem_sources WHERE poem_id = ? AND is_current = 1 ORDER BY version DESC LIMIT 1",
+                    (str(poem_id),),
+                ).fetchone()
+                result = self._insert_poem_source_locked(
+                    connection,
+                    str(poem_id),
+                    source,
+                    actor=actor,
+                    now=now,
+                )
+                connection.execute(
+                    "UPDATE poems SET source = ?, updated_at = ? WHERE id = ?",
+                    (source["citation"], now, str(poem_id)),
+                )
+                connection.execute(
+                    """
+                    UPDATE content_versions SET source = ?
+                    WHERE id = (
+                        SELECT id FROM content_versions
+                        WHERE poem_id = ? ORDER BY version DESC LIMIT 1
+                    )
+                    """,
+                    (source["citation"], str(poem_id)),
+                )
+                self._audit(
+                    connection,
+                    actor={"id": actor_id, "role": actor_role},
+                    action="poem.source_verified"
+                    if source["verification_status"] == "verified"
+                    else "poem.source_updated",
+                    target_type="poem",
+                    target_id=str(poem_id),
+                    before=self._poem_source_dict(before) if before else None,
+                    after={**result, "warnings": warnings},
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return result
+
+    def data_quality_report(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> dict[str, Any]:
+        self.project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT p.*,
+                       s.id AS source_id, s.source_type,
+                       s.citation AS source_citation,
+                       s.license AS source_license,
+                       s.verification_status AS source_verification_status,
+                       s.verified_at AS source_verified_at,
+                       cv.id AS content_version_id,
+                       cv.status AS content_status,
+                       cv.notes AS content_notes
+                FROM poems p
+                LEFT JOIN poem_sources s ON s.id = (
+                    SELECT s2.id FROM poem_sources s2
+                    WHERE s2.poem_id = p.id AND s2.is_current = 1
+                    ORDER BY s2.version DESC LIMIT 1
+                )
+                LEFT JOIN content_versions cv ON cv.id = (
+                    SELECT cv2.id FROM content_versions cv2
+                    WHERE cv2.poem_id = p.id
+                    ORDER BY cv2.version DESC LIMIT 1
+                )
+                WHERE p.project_id = ?
+                ORDER BY p.title
+                """,
+                (project_id,),
+            ).fetchall()
+        text_groups: dict[str, list[str]] = {}
+        for row in rows:
+            normalized_text = "".join(_decode(row["lines_json"], [])).replace(" ", "")
+            if normalized_text:
+                text_groups.setdefault(normalized_text, []).append(row["id"])
+        duplicate_ids = {
+            poem_id
+            for ids in text_groups.values()
+            if len(ids) > 1
+            for poem_id in ids
+        }
+        issue_definitions = {
+            "SOURCE_MISSING": ("critical", "补录来源引文、类型与许可"),
+            "SOURCE_UNVERIFIED": ("high", "由内容编辑核验当前来源"),
+            "SOURCE_RESTRICTED": ("critical", "更换可用于项目交付的来源"),
+            "LICENSE_MISSING": ("critical", "补录明确的内容许可"),
+            "CONTENT_VERSION_MISSING": ("critical", "创建可审核内容版本"),
+            "CONTENT_NOT_APPROVED": ("high", "完成正文与来源审核"),
+            "THEME_MISSING": ("medium", "补充题材标签"),
+            "MOOD_MISSING": ("medium", "补充情绪描述"),
+            "IMAGERY_MISSING": ("medium", "补充核心意象"),
+            "NOTES_MISSING": ("low", "补充自有整理的内容备注"),
+            "DYNASTY_UNEXPECTED": ("high", "确认是否属于当前唐诗项目"),
+            "TEXT_DUPLICATE": ("critical", "核对重复正文与稳定 ID"),
+            "LINES_UNUSUAL": ("medium", "核对分行和正文完整性"),
+        }
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        items: list[dict[str, Any]] = []
+        issue_counts: dict[str, int] = {}
+        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        source_complete = source_verified = license_ready = 0
+        content_approved = metadata_complete = production_ready = 0
+        for row in rows:
+            issues: list[str] = []
+            citation = str(row["source_citation"] or "").strip()
+            license_name = str(row["source_license"] or "").strip()
+            source_status = str(row["source_verification_status"] or "")
+            if not citation:
+                issues.append("SOURCE_MISSING")
+            else:
+                source_complete += 1
+            if source_status == "restricted":
+                issues.append("SOURCE_RESTRICTED")
+            elif source_status != "verified":
+                issues.append("SOURCE_UNVERIFIED")
+            else:
+                source_verified += 1
+            if not license_name or license_name.lower() in {"unknown", "needs-review"}:
+                issues.append("LICENSE_MISSING")
+            elif license_name.lower() == "restricted":
+                if "SOURCE_RESTRICTED" not in issues:
+                    issues.append("SOURCE_RESTRICTED")
+            else:
+                license_ready += 1
+            if not row["content_version_id"]:
+                issues.append("CONTENT_VERSION_MISSING")
+            elif row["content_status"] != "approved":
+                issues.append("CONTENT_NOT_APPROVED")
+            else:
+                content_approved += 1
+            imagery = _decode(row["imagery_json"], [])
+            if not str(row["theme"] or "").strip():
+                issues.append("THEME_MISSING")
+            if not str(row["mood"] or "").strip():
+                issues.append("MOOD_MISSING")
+            if not imagery:
+                issues.append("IMAGERY_MISSING")
+            if not str(row["content_notes"] or "").strip():
+                issues.append("NOTES_MISSING")
+            if str(row["dynasty"] or "").strip() != "唐":
+                issues.append("DYNASTY_UNEXPECTED")
+            line_count = len(_decode(row["lines_json"], []))
+            if not 2 <= line_count <= 20:
+                issues.append("LINES_UNUSUAL")
+            if row["id"] in duplicate_ids:
+                issues.append("TEXT_DUPLICATE")
+            if all(
+                bool(value)
+                for value in (str(row["theme"] or "").strip(), str(row["mood"] or "").strip(), imagery)
+            ):
+                metadata_complete += 1
+            blocking = {
+                code
+                for code in issues
+                if issue_definitions[code][0] in {"critical", "high"}
+            }
+            if not blocking:
+                production_ready += 1
+            for code in issues:
+                issue_counts[code] = issue_counts.get(code, 0) + 1
+                severity_counts[issue_definitions[code][0]] += 1
+            items.append(
+                {
+                    "poem_id": row["id"],
+                    "title": row["title"],
+                    "author": row["author"],
+                    "status": row["status"],
+                    "source_status": source_status or "missing",
+                    "issue_codes": issues,
+                    "blocking_issue_count": len(blocking),
+                    "suggested_actions": list(
+                        dict.fromkeys(issue_definitions[code][1] for code in issues)
+                    ),
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                min(
+                    (
+                        severity_order[issue_definitions[code][0]]
+                        for code in item["issue_codes"]
+                    ),
+                    default=4,
+                ),
+                -item["blocking_issue_count"],
+                item["title"],
+            )
+        )
+        total = len(rows)
+        divisor = max(1, total)
+        coverage = {
+            "source_present": round(source_complete / divisor * 100, 1),
+            "source_verified": round(source_verified / divisor * 100, 1),
+            "license_ready": round(license_ready / divisor * 100, 1),
+            "content_approved": round(content_approved / divisor * 100, 1),
+            "metadata_complete": round(metadata_complete / divisor * 100, 1),
+        }
+        quality_score = round(
+            coverage["source_present"] * 0.15
+            + coverage["source_verified"] * 0.25
+            + coverage["license_ready"] * 0.2
+            + coverage["content_approved"] * 0.25
+            + coverage["metadata_complete"] * 0.15,
+            1,
+        )
+        return {
+            "project_id": project_id,
+            "target_poem_count": 300,
+            "total_poems": total,
+            "remaining_to_target": max(0, 300 - total),
+            "production_ready_count": production_ready,
+            "blocking_poem_count": sum(
+                item["blocking_issue_count"] > 0 for item in items
+            ),
+            "quality_score": quality_score,
+            "coverage": coverage,
+            "severity_counts": severity_counts,
+            "issue_counts": issue_counts,
+            "ready_for_300_production": total >= 300
+            and production_ready == total,
+            "items": items[:500],
+            "generated_at": utc_now(),
         }
 
     def approve_content(
@@ -2475,6 +2993,40 @@ class SopStore:
                     raise WorkflowError(
                         "SOURCE_REQUIRED",
                         "补充诗词来源后才能批准内容。",
+                        status=409,
+                    )
+                source = connection.execute(
+                    """
+                    SELECT * FROM poem_sources
+                    WHERE poem_id = ? AND is_current = 1
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (poem_id,),
+                ).fetchone()
+                if not source:
+                    raise WorkflowError(
+                        "SOURCE_METADATA_REQUIRED",
+                        "补充结构化来源类型、许可和核验状态后才能批准内容。",
+                        status=409,
+                    )
+                if source["verification_status"] == "restricted" or str(
+                    source["license"]
+                ).lower() == "restricted":
+                    raise WorkflowError(
+                        "SOURCE_LICENSE_BLOCKED",
+                        "当前来源许可受限，不能进入生产。",
+                        status=409,
+                    )
+                if (
+                    source["verification_status"] != "verified"
+                    or not str(source["citation"]).strip()
+                    or not str(source["license"]).strip()
+                    or str(source["license"]).lower()
+                    in {"unknown", "needs-review"}
+                ):
+                    raise WorkflowError(
+                        "SOURCE_VERIFICATION_REQUIRED",
+                        "来源引文与许可必须完成核验后才能批准内容。",
                         status=409,
                     )
                 content = connection.execute(
@@ -2834,6 +3386,10 @@ class SopStore:
                 """,
                 (poem_id,),
             ).fetchall()
+            source_rows = connection.execute(
+                "SELECT * FROM poem_sources WHERE poem_id = ? ORDER BY version DESC",
+                (poem_id,),
+            ).fetchall()
             requirement_rows = connection.execute(
                 """
                 SELECT * FROM requirements
@@ -2927,6 +3483,7 @@ class SopStore:
             ).fetchall()
 
             linked_ids = [poem_id]
+            linked_ids.extend(row["id"] for row in source_rows)
             linked_ids.extend(row["id"] for row in requirement_rows)
             linked_ids.extend(row["id"] for row in requirement_run_rows)
             linked_ids.extend(row["id"] for row in direction_rows)
@@ -2973,6 +3530,7 @@ class SopStore:
             audit_events.append(item)
         return {
             "poem": self._poem_dict(poem_row),
+            "sources": [self._poem_source_dict(row) for row in source_rows],
             "content_versions": contents,
             "requirements": requirements,
             "requirement_generation_runs": requirement_runs,
@@ -2986,6 +3544,7 @@ class SopStore:
             "audit_events": audit_events,
             "counts": {
                 "content_versions": len(contents),
+                "sources": len(source_rows),
                 "requirements": len(requirements),
                 "requirement_generation_runs": len(requirement_runs),
                 "directions": len(directions),
@@ -6217,6 +6776,27 @@ class SopStore:
                 )
                 final_asset = None
                 if both_approved:
+                    source = connection.execute(
+                        """
+                        SELECT * FROM poem_sources
+                        WHERE poem_id = ? AND is_current = 1
+                        ORDER BY version DESC LIMIT 1
+                        """,
+                        (image["poem_id"],),
+                    ).fetchone()
+                    if (
+                        not source
+                        or source["verification_status"] != "verified"
+                        or not str(source["citation"]).strip()
+                        or not str(source["license"]).strip()
+                        or str(source["license"]).lower()
+                        in {"unknown", "needs-review", "restricted"}
+                    ):
+                        raise WorkflowError(
+                            "SOURCE_BLOCKS_FINALIZATION",
+                            "诗词来源或许可尚未完成核验，不能锁定交付资产。",
+                            status=409,
+                        )
                     qc = connection.execute(
                         """
                         SELECT * FROM qc_results
@@ -7840,6 +8420,7 @@ class SopStore:
         return {
             "summary": self.summary(project_id),
             "production_report": self.production_report(project_id),
+            "data_quality": self.data_quality_report(project_id),
             "poems": self.list_poems(project_id)["items"],
             "requirements": self.requirements(project_id),
             "requirement_generation_failures": self.requirement_generation_runs(
@@ -7850,6 +8431,9 @@ class SopStore:
             "requirement_schema": {
                 "schema_version": REQUIREMENT_SCHEMA_VERSION,
                 "generator_version": REQUIREMENT_GENERATOR_VERSION,
+            },
+            "poem_import_schema": {
+                "schema_version": POEM_IMPORT_SCHEMA_VERSION,
             },
             "directions": self.directions(project_id),
             "direction_generation_failures": self.direction_generation_runs(

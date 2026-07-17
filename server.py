@@ -30,6 +30,13 @@ from urllib.parse import parse_qs, urlparse
 
 from backup_service import create_backup, list_backups, verify_backup
 from direction_schema import schema_document as direction_schema_document
+from poem_import_schema import (
+    PoemImportContractError,
+    csv_template_text,
+    json_template_document,
+    parse_import_document,
+    schema_document as poem_import_schema_document,
+)
 from qc_engine import QC_VERSION, inspect_image
 from review_schema import (
     compose_qc_result,
@@ -56,7 +63,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -1405,6 +1412,23 @@ class StudioHandler(BaseHTTPRequestHandler):
             exc.status,
         )
 
+    def _send_download(
+        self,
+        payload: bytes,
+        *,
+        content_type: str,
+        filename: str,
+    ) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Request-ID", self._request_id())
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > 2_000_000:
@@ -1565,6 +1589,16 @@ class StudioHandler(BaseHTTPRequestHandler):
                         HTTPStatus.BAD_REQUEST,
                     )
             return
+        if path == "/api/reports/data-quality":
+            try:
+                self._send_json(
+                    get_sop_store().data_quality_report(
+                        query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+                    )
+                )
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
         if path == "/api/poems":
             try:
                 result = get_sop_store().list_poems(
@@ -1611,6 +1645,34 @@ class StudioHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/schemas/qc-policy":
             self._send_json(qc_policy_schema_document())
+            return
+        if path == "/api/schemas/poem-import":
+            self._send_json(poem_import_schema_document())
+            return
+        if path == "/api/templates/poem-import":
+            format_name = query.get("format", ["json"])[0].lower()
+            if format_name == "csv":
+                self._send_download(
+                    csv_template_text().encode("utf-8-sig"),
+                    content_type="text/csv; charset=utf-8",
+                    filename="poem-import-template.csv",
+                )
+            elif format_name == "json":
+                self._send_download(
+                    json.dumps(
+                        json_template_document(), ensure_ascii=False, indent=2
+                    ).encode("utf-8"),
+                    content_type="application/json; charset=utf-8",
+                    filename="poem-import-template.json",
+                )
+            else:
+                self._send_json(
+                    {
+                        "code": "IMPORT_FORMAT_UNSUPPORTED",
+                        "message": "模板格式只支持 json 或 csv。",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
             return
         if path == "/api/qc-policies":
             project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
@@ -2306,6 +2368,14 @@ class StudioHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 records = body.get("records")
+                if records is None and "content" in body:
+                    try:
+                        records = parse_import_document(
+                            str(body.get("content") or ""),
+                            str(body.get("format") or "json"),
+                        )
+                    except PoemImportContractError as exc:
+                        raise WorkflowError(exc.code, str(exc)) from exc
                 if bool(body.get("commit")):
                     result = get_sop_store().import_poems(
                         import_match.group(1),
@@ -2319,6 +2389,21 @@ class StudioHandler(BaseHTTPRequestHandler):
                             import_match.group(1), records
                         )
                     )
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        source_update = re.fullmatch(
+            r"/api/poems/([a-z0-9-]{3,80})/source", path
+        )
+        if source_update:
+            try:
+                body = self._read_json()
+                source = get_sop_store().update_poem_source(
+                    source_update.group(1),
+                    body.get("source"),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"source": source})
             except WorkflowError as exc:
                 self._send_workflow_error(exc)
             return

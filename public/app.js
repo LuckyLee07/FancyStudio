@@ -37,6 +37,8 @@ const state = {
     final_assets: [],
     export_packages: [],
     backups: [],
+    data_quality: null,
+    poem_import_schema: null,
   },
   activeView: "overview",
   selectedPoems: new Set(),
@@ -45,11 +47,13 @@ const state = {
   poemQuery: "",
   poemStatus: "",
   requirementFilter: "all",
-  importRecords: null,
+  importPayload: null,
   importPreview: null,
   batchEstimate: null,
   loading: false,
   currentImageId: null,
+  currentPoemId: null,
+  currentPoemSource: null,
   reviewSelection: new Set(),
   reviewShowBlocked: false,
   assetQuery: "",
@@ -65,6 +69,33 @@ const roleLabels = {
   art_director: "美术指导",
   ai_operator: "AI 操作员",
   system_admin: "系统管理员",
+};
+const sourceTypeLabels = {
+  public_domain: "公共领域",
+  self_curated: "自有整理",
+  licensed: "已授权",
+  academic_reference: "学术参考",
+  unknown: "待确认",
+};
+const sourceStatusLabels = {
+  verified: "已核验",
+  unverified: "待核验",
+  restricted: "许可受限",
+};
+const dataIssueLabels = {
+  SOURCE_MISSING: "缺少来源",
+  SOURCE_UNVERIFIED: "来源待核验",
+  SOURCE_RESTRICTED: "来源受限",
+  LICENSE_MISSING: "许可缺失",
+  CONTENT_VERSION_MISSING: "内容版本缺失",
+  CONTENT_NOT_APPROVED: "内容待审",
+  THEME_MISSING: "题材缺失",
+  MOOD_MISSING: "情绪缺失",
+  IMAGERY_MISSING: "意象缺失",
+  NOTES_MISSING: "整理备注缺失",
+  DYNASTY_UNEXPECTED: "朝代异常",
+  TEXT_DUPLICATE: "正文重复",
+  LINES_UNUSUAL: "分行异常",
 };
 const storedRole = localStorage.getItem("tang-sop-role");
 const initialRole = roleLabels[storedRole] ? storedRole : "producer";
@@ -1610,6 +1641,11 @@ function renderResources() {
   const qcPolicyContent = qcPolicy.content || {};
   const qcThresholds = qcPolicyContent.thresholds || {};
   const qcCalibration = state.sop.qc_calibration || {};
+  const dataQuality = state.sop.data_quality || {};
+  const qualityCoverage = dataQuality.coverage || {};
+  const topDataIssues = Object.entries(dataQuality.issue_counts || {})
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 6);
   const budget = state.sop.budget || {};
   const hardLimit = Number(budget.hard_limit || 0);
   const spent = Number(budget.spent || 0);
@@ -1723,6 +1759,58 @@ function renderResources() {
             : `${(Number(qcCalibration.false_reject_rate) * 100).toFixed(1)}%`
         }</small>
       </div>
+    </article>
+    <article class="resource-panel data-quality-panel">
+      <span class="resource-label">POEM DATA QUALITY</span>
+      <div class="data-quality-title">
+        <div><h3>300 首数据就绪度</h3><small>${escapeHtml(
+          state.sop.poem_import_schema?.schema_version || "poem-import/v1",
+        )}</small></div>
+        <strong>${Number(dataQuality.quality_score || 0).toFixed(1)}<small>/ 100</small></strong>
+      </div>
+      <div class="data-quality-metrics">
+        <span><small>已入库</small><strong>${Number(dataQuality.total_poems || 0)} / ${Number(
+          dataQuality.target_poem_count || 300,
+        )}</strong></span>
+        <span><small>生产就绪</small><strong>${Number(dataQuality.production_ready_count || 0)}</strong></span>
+        <span class="${Number(dataQuality.blocking_poem_count || 0) ? "has-error" : ""}"><small>阻断诗词</small><strong>${Number(
+          dataQuality.blocking_poem_count || 0,
+        )}</strong></span>
+      </div>
+      <div class="quality-coverage-grid">
+        ${[
+          ["来源存在", qualityCoverage.source_present],
+          ["来源已核验", qualityCoverage.source_verified],
+          ["许可可用", qualityCoverage.license_ready],
+          ["内容已批准", qualityCoverage.content_approved],
+          ["元数据完整", qualityCoverage.metadata_complete],
+        ]
+          .map(
+            ([label, value]) => `<span><small>${label}</small><strong>${Number(value || 0).toFixed(
+              1,
+            )}%</strong><i><b style="width:${Math.min(100, Number(value || 0))}%"></b></i></span>`,
+          )
+          .join("")}
+      </div>
+      <div class="quality-issue-list">
+        ${topDataIssues.length
+          ? topDataIssues
+              .map(
+                ([code, count]) => `<span title="${escapeHtml(code)}"><strong>${Number(
+                  count,
+                )}</strong>${escapeHtml(dataIssueLabels[code] || code)}</span>`,
+              )
+              .join("")
+          : "<span class=\"quality-clear\">当前入库数据没有质量问题。</span>"}
+      </div>
+      <div class="import-template-actions">
+        <button class="primary-button" type="button" data-open-poem-import>导入 / 补充诗词</button>
+        <a class="secondary-button" href="/api/templates/poem-import?format=csv" download>CSV 模板</a>
+        <a class="secondary-button" href="/api/templates/poem-import?format=json" download>JSON 模板</a>
+      </div>
+      <p>${dataQuality.ready_for_300_production
+        ? "300 首已全部通过来源、授权、内容与元数据门禁。"
+        : `距离 300 首还差 ${Number(dataQuality.remaining_to_target || 0)} 首；阻断项必须在批量生产前清零。`}</p>
     </article>
     <article class="resource-panel backup-panel">
       <span class="resource-label">BACKUP & RECOVERY</span>
@@ -1874,6 +1962,9 @@ async function openPoemDetail(poemId) {
   try {
     const detail = await api(`/api/poems/${poemId}`);
     const poem = detail.poem;
+    const currentSource = (detail.sources || []).find((item) => item.is_current) || null;
+    state.currentPoemId = poem.id;
+    state.currentPoemSource = currentSource;
     const counts = detail.counts || {};
     document.querySelector("#poem-detail-title").textContent = `${poem.title} · 全链路详情`;
     const latestRequirement = detail.requirements.find((item) => item.is_current);
@@ -1891,6 +1982,7 @@ async function openPoemDetail(poemId) {
       <section class="poem-chain-metrics">
         ${[
           ["内容版本", counts.content_versions || 0],
+          ["来源版本", counts.sources || 0],
           ["需求版本", counts.requirements || 0],
           ["需求运行", counts.requirement_generation_runs || 0],
           ["方向版本", counts.directions || 0],
@@ -1908,6 +2000,16 @@ async function openPoemDetail(poemId) {
         <article>
           <header><span>S1</span><div><strong>内容与需求</strong><small>版本冻结与证据</small></div></header>
           <p>内容 v${detail.content_versions[0]?.version || "—"} · ${escapeHtml(detail.content_versions[0]?.status || "缺失")}</p>
+          <div class="poem-source-summary ${currentSource?.verification_status === "verified" ? "is-verified" : "is-blocked"}">
+            <div><strong>${escapeHtml(currentSource?.citation || "来源未录入")}</strong><small>${escapeHtml(
+              sourceTypeLabels[currentSource?.source_type] || currentSource?.source_type || "待确认",
+            )} · ${escapeHtml(sourceStatusLabels[currentSource?.verification_status] || "待核验")} · ${escapeHtml(
+              currentSource?.license || "许可未填写",
+            )}</small></div>
+            <button class="secondary-button" type="button" data-role-allow="content_editor,producer,system_admin" data-edit-poem-source="${escapeHtml(
+              poem.id,
+            )}">${currentSource ? "修订来源" : "补录来源"}</button>
+          </div>
           <p>需求 ${latestRequirement ? `v${latestRequirement.version} · ${escapeHtml(latestRequirement.status)}` : "尚未生成"}</p>
           <p>${latestRequirementRun ? `${escapeHtml(latestRequirementRun.schema_version)} · ${escapeHtml(latestRequirementRun.status)} · 修复 ${latestRequirementRun.repair_attempts || 0}/1` : "尚无需求生成运行记录"}</p>
           ${latestRequirementRun?.error_code ? `<small class="error-code">${escapeHtml(latestRequirementRun.error_code)} · ${escapeHtml(latestRequirementRun.error_message)}</small>` : ""}
@@ -1954,6 +2056,54 @@ async function openPoemDetail(poemId) {
       </section>`;
   } catch (error) {
     content.innerHTML = `<div class="empty-state compact"><strong>详情加载失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openSourceDialog(poemId) {
+  const poem = poemById(poemId);
+  const source = state.currentPoemId === poemId ? state.currentPoemSource || {} : {};
+  const form = document.querySelector("#source-form");
+  form.reset();
+  form.elements.poem_id.value = poemId;
+  form.elements.source_type.value = source.source_type || "public_domain";
+  form.elements.verification_status.value = source.verification_status || "verified";
+  form.elements.citation.value = source.citation || poem?.source || "";
+  form.elements.license.value = source.license || "";
+  form.elements.url.value = source.url || "";
+  form.elements.verified_at.value = String(source.verified_at || new Date().toISOString())
+    .slice(0, 10);
+  document.querySelector("#source-dialog-title").textContent = `${poem?.title || poemId} · 来源核验`;
+  document.querySelector("#poem-detail-dialog")?.close();
+  document.querySelector("#source-dialog").showModal();
+  applyRoleVisibility();
+}
+
+async function submitPoemSource(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const poemId = form.elements.poem_id.value;
+  const verificationStatus = form.elements.verification_status.value;
+  try {
+    await api(`/api/poems/${poemId}/source`, {
+      method: "POST",
+      body: JSON.stringify({
+        source: {
+          source_type: form.elements.source_type.value,
+          citation: form.elements.citation.value.trim(),
+          license: form.elements.license.value.trim(),
+          verification_status: verificationStatus,
+          url: form.elements.url.value.trim(),
+          verified_at:
+            verificationStatus === "verified" ? form.elements.verified_at.value : "",
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#source-dialog").close();
+    await refreshSop("来源版本已保存，质量报告已同步重算。");
+    await openPoemDetail(poemId);
+  } catch (error) {
+    showToast(error.message, error.code === "SOURCE_DOWNGRADE_BLOCKED" ? "warning" : "error");
   }
 }
 
@@ -3047,17 +3197,13 @@ async function runBatchAction(batchId, action) {
   }
 }
 
-function parseImportRecords() {
+function readImportPayload() {
   const raw = document.querySelector("#import-json").value.trim();
-  if (!raw) throw new Error("请选择 JSON 文件或粘贴诗词数据。");
-  let records;
-  try {
-    records = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`JSON 格式错误：${error.message}`);
-  }
-  if (!Array.isArray(records)) throw new Error("导入内容必须是 JSON 数组。");
-  return records;
+  if (!raw) throw new Error("请选择 JSON / CSV 文件，或粘贴诗词数据。");
+  return {
+    content: raw,
+    format: document.querySelector("#import-format").value,
+  };
 }
 
 function renderImportPreview(preview) {
@@ -3071,14 +3217,21 @@ function renderImportPreview(preview) {
     <div class="import-metrics">
       <span><strong>${counts.total}</strong> 总记录</span>
       <span><strong>${counts.new}</strong> 新增</span>
+      <span><strong>${counts.source_update || 0}</strong> 来源修订</span>
       <span><strong>${counts.unchanged}</strong> 未变化</span>
       <span class="${counts.conflict ? "has-error" : ""}"><strong>${counts.conflict}</strong> 冲突</span>
       <span class="${counts.invalid ? "has-error" : ""}"><strong>${counts.invalid}</strong> 无效</span>
       <span class="${counts.warnings ? "has-warning" : ""}"><strong>${counts.warnings}</strong> 警告</span>
     </div>
+    <div class="import-quality-metrics">
+      <span><small>来源已填</small><strong>${Number(preview.quality?.structured_source_count || 0)} / ${counts.total}</strong></span>
+      <span><small>来源已核验</small><strong>${Number(preview.quality?.verified_source_count || 0)} / ${counts.total}</strong></span>
+      <span><small>许可可用</small><strong>${Number(preview.quality?.license_ready_count || 0)} / ${counts.total}</strong></span>
+      <span><small>元数据完整</small><strong>${Number(preview.quality?.metadata_complete_count || 0)} / ${counts.total}</strong></span>
+    </div>
     <div class="import-verdict ${preview.can_commit ? "is-ready" : "is-blocked"}">
       <strong>${preview.can_commit ? "✓ 预检通过，可以提交" : "× 预检未通过，不能提交"}</strong>
-      <span>${preview.can_commit ? "提交只会新增记录，不覆盖已有诗词。" : "请先处理无效字段或正文冲突。"}</span>
+      <span>${preview.can_commit ? "提交会新增诗词或来源版本，正文不会被静默覆盖。" : "请先处理无效字段、来源降级或正文冲突。"}</span>
     </div>
     ${
       issues.length
@@ -3110,10 +3263,10 @@ function renderImportPreview(preview) {
 async function previewImport(event) {
   event.preventDefault();
   try {
-    state.importRecords = parseImportRecords();
+    state.importPayload = readImportPayload();
     const preview = await api(`/api/projects/${project().id}/poems/import`, {
       method: "POST",
-      body: JSON.stringify({ records: state.importRecords, commit: false }),
+      body: JSON.stringify({ ...state.importPayload, commit: false }),
     });
     state.importPreview = preview;
     renderImportPreview(preview);
@@ -3125,23 +3278,25 @@ async function previewImport(event) {
 }
 
 async function commitImport() {
-  if (!state.importPreview?.can_commit || !state.importRecords) return;
+  if (!state.importPreview?.can_commit || !state.importPayload) return;
   try {
     const result = await api(`/api/projects/${project().id}/poems/import`, {
       method: "POST",
       body: JSON.stringify({
-        records: state.importRecords,
+        ...state.importPayload,
         commit: true,
         actor: ACTOR,
       }),
     });
     document.querySelector("#import-dialog").close();
-    state.importRecords = null;
+    state.importPayload = null;
     state.importPreview = null;
     document.querySelector("#import-form").reset();
     document.querySelector("#import-result").hidden = true;
     document.querySelector("#commit-import-button").disabled = true;
-    await refreshSop(`已导入 ${result.imported} 首诗词，${result.unchanged} 首保持不变。`);
+    await refreshSop(
+      `已导入 ${result.imported} 首诗词，新增 ${result.source_updated || 0} 个来源版本，${result.unchanged} 首保持不变。`,
+    );
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -3628,6 +3783,13 @@ document.addEventListener("click", (event) => {
   const poemDetail = event.target.closest("[data-open-poem-detail]");
   if (poemDetail) openPoemDetail(poemDetail.dataset.openPoemDetail);
 
+  const editPoemSource = event.target.closest("[data-edit-poem-source]");
+  if (editPoemSource) openSourceDialog(editPoemSource.dataset.editPoemSource);
+
+  if (event.target.closest("[data-open-poem-import]")) {
+    document.querySelector("#import-dialog").showModal();
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     const action = actionButton.dataset.action;
@@ -3969,6 +4131,7 @@ document.querySelector("#open-import-button").addEventListener("click", () => {
 });
 document.querySelector("#import-form").addEventListener("submit", previewImport);
 document.querySelector("#commit-import-button").addEventListener("click", commitImport);
+document.querySelector("#source-form").addEventListener("submit", submitPoemSource);
 document.querySelector("#rework-form").addEventListener("submit", submitRework);
 document.querySelector("#compare-selected-button").addEventListener("click", openComparison);
 document.querySelector("#export-assets-button").addEventListener("click", exportFinalAssets);
@@ -3989,6 +4152,9 @@ document.querySelector("#import-file").addEventListener("change", async (event) 
   }
   try {
     document.querySelector("#import-json").value = await file.text();
+    document.querySelector("#import-format").value = file.name.toLowerCase().endsWith(".csv")
+      ? "csv"
+      : "json";
     showToast(`已读取 ${file.name}，请点击“预检数据”。`);
   } catch (error) {
     showToast(`无法读取文件：${error.message}`, "error");

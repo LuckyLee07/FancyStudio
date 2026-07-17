@@ -79,6 +79,19 @@ class TangPoemStudioTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
+    def request_json_error(self, path, method="GET", payload=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            urllib.request.urlopen(request, timeout=5)
+        error = context.exception
+        return error.code, json.loads(error.read().decode("utf-8"))
+
     def test_health_and_bootstrap(self):
         status, health = self.request_json("/api/health")
         self.assertEqual(status, 200)
@@ -566,7 +579,13 @@ class TangPoemStudioTests(unittest.TestCase):
                     "飞流直下三千尺",
                     "疑是银河落九天",
                 ],
-                "source": "项目自有公版整理",
+                "source": {
+                    "source_type": "public_domain",
+                    "citation": "项目自有公版整理，依据公共领域底本校勘",
+                    "license": "Public Domain",
+                    "verification_status": "verified",
+                    "verified_at": "2026-07-18",
+                },
                 "theme": "山水",
                 "mood": "壮阔、明亮",
                 "imagery": ["香炉峰", "瀑布", "银河"],
@@ -576,7 +595,14 @@ class TangPoemStudioTests(unittest.TestCase):
         status, preview = self.request_json(
             path,
             method="POST",
-            payload={"records": records, "commit": False},
+            payload={
+                "content": json.dumps(
+                    {"schema_version": "poem-import/v1", "records": records},
+                    ensure_ascii=False,
+                ),
+                "format": "json",
+                "commit": False,
+            },
         )
         self.assertEqual(status, 200)
         self.assertTrue(preview["can_commit"])
@@ -586,7 +612,11 @@ class TangPoemStudioTests(unittest.TestCase):
             path,
             method="POST",
             payload={
-                "records": records,
+                "content": json.dumps(
+                    {"schema_version": "poem-import/v1", "records": records},
+                    ensure_ascii=False,
+                ),
+                "format": "json",
                 "commit": True,
                 "actor": {"id": "importer-api", "role": "content_editor"},
             },
@@ -603,6 +633,86 @@ class TangPoemStudioTests(unittest.TestCase):
 
         status, approved = self.request_json(
             "/api/poems/wang-lu-shan-pu-bu/content/approve",
+            method="POST",
+            payload={"actor": {"id": "editor-api", "role": "content_editor"}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(approved["poem"]["status"], "requirement_draft")
+
+        status, schema = self.request_json("/api/schemas/poem-import")
+        self.assertEqual(status, 200)
+        self.assertEqual(schema["title"], "PoemImportDocument v1")
+
+        template_request = urllib.request.Request(
+            self.base_url + "/api/templates/poem-import?format=csv"
+        )
+        with urllib.request.urlopen(template_request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn("attachment", response.headers["Content-Disposition"])
+            self.assertTrue(response.read().decode("utf-8-sig").startswith("id,title"))
+
+        status, report = self.request_json("/api/reports/data-quality")
+        self.assertEqual(status, 200)
+        self.assertEqual(report["target_poem_count"], 300)
+        self.assertEqual(report["total_poems"], 13)
+        self.assertIn("coverage", report)
+
+    def test_source_verification_endpoint_unlocks_content_approval(self):
+        record = {
+            "id": "test-source-gate-poem",
+            "title": "来源门禁测试诗",
+            "author": "王之涣",
+            "dynasty": "唐",
+            "lines": ["白日依山尽", "黄河入海流", "欲穷千里目", "更上一层楼"],
+            "theme": "登临",
+            "mood": "开阔",
+            "imagery": ["白日", "黄河", "高楼"],
+            "source": {
+                "source_type": "unknown",
+                "citation": "待复核底本",
+                "license": "needs-review",
+                "verification_status": "unverified",
+            },
+        }
+        path = f"/api/projects/{server.SOP_DEFAULT_PROJECT_ID}/poems/import"
+        status, _ = self.request_json(
+            path,
+            method="POST",
+            payload={
+                "records": [record],
+                "commit": True,
+                "actor": {"id": "editor-api", "role": "content_editor"},
+            },
+        )
+        self.assertEqual(status, 201)
+
+        status, blocked = self.request_json_error(
+            "/api/poems/test-source-gate-poem/content/approve",
+            method="POST",
+            payload={"actor": {"id": "editor-api", "role": "content_editor"}},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(blocked["code"], "SOURCE_VERIFICATION_REQUIRED")
+
+        status, updated = self.request_json(
+            "/api/poems/test-source-gate-poem/source",
+            method="POST",
+            payload={
+                "source": {
+                    "source_type": "public_domain",
+                    "citation": "公共领域底本，内容编辑完成逐句复核",
+                    "license": "Public Domain",
+                    "verification_status": "verified",
+                    "verified_at": "2026-07-18",
+                },
+                "actor": {"id": "editor-api", "role": "content_editor"},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["source"]["version"], 2)
+
+        status, approved = self.request_json(
+            "/api/poems/test-source-gate-poem/content/approve",
             method="POST",
             payload={"actor": {"id": "editor-api", "role": "content_editor"}},
         )

@@ -781,7 +781,13 @@ class SopStoreTests(unittest.TestCase):
                 "theme": "山水",
                 "mood": "壮阔、明亮",
                 "imagery": ["香炉峰", "瀑布", "银河"],
-                "source": "项目自有公版整理",
+                "source": {
+                    "source_type": "public_domain",
+                    "citation": "项目自有公版整理，依据公共领域底本校勘",
+                    "license": "Public Domain",
+                    "verification_status": "verified",
+                    "verified_at": "2026-07-18",
+                },
             },
             {
                 "id": "zao-fa-bai-di-cheng",
@@ -831,6 +837,42 @@ class SopStoreTests(unittest.TestCase):
         self.assertEqual(repeated_commit["imported"], 0)
         self.assertEqual(repeated_commit["unchanged"], 2)
 
+        source_revision = {
+            **records[0],
+            "source": {
+                **records[0]["source"],
+                "citation": "项目自有公版整理，依据公共领域底本完成二次校勘",
+            },
+        }
+        source_preview = self.store.preview_poem_import(
+            DEFAULT_PROJECT_ID, [source_revision]
+        )
+        self.assertTrue(source_preview["can_commit"])
+        self.assertEqual(source_preview["counts"]["source_update"], 1)
+        source_commit = self.store.import_poems(
+            DEFAULT_PROJECT_ID, [source_revision], actor=self.actor
+        )
+        self.assertEqual(source_commit["source_updated"], 1)
+        sources = self.store.poem_sources("wang-lu-shan-pu-bu")
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(sources[0]["version"], 2)
+        self.assertTrue(sources[0]["is_current"])
+
+        downgrade = {
+            **records[0],
+            "source": {
+                "source_type": "unknown",
+                "citation": "待复核来源",
+                "license": "needs-review",
+                "verification_status": "unverified",
+            },
+        }
+        downgrade_preview = self.store.preview_poem_import(
+            DEFAULT_PROJECT_ID, [downgrade]
+        )
+        self.assertFalse(downgrade_preview["can_commit"])
+        self.assertEqual(downgrade_preview["counts"]["invalid"], 1)
+
         conflict_records = [
             {
                 **records[0],
@@ -858,6 +900,49 @@ class SopStoreTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "IMPORT_BLOCKED")
         self.assertEqual(self.store.summary()["total_poems"], 14)
+
+        quality = self.store.data_quality_report(DEFAULT_PROJECT_ID)
+        self.assertEqual(quality["target_poem_count"], 300)
+        self.assertEqual(quality["total_poems"], 14)
+        self.assertIn("coverage", quality)
+        self.assertGreaterEqual(quality["production_ready_count"], 13)
+
+    def test_unverified_source_blocks_content_until_new_verified_version(self):
+        record = {
+            "id": "test-source-gate-poem",
+            "title": "来源门禁测试诗",
+            "author": "王之涣",
+            "dynasty": "唐",
+            "lines": ["白日依山尽", "黄河入海流", "欲穷千里目", "更上一层楼"],
+            "theme": "登临",
+            "mood": "开阔",
+            "imagery": ["白日", "黄河", "高楼"],
+            "source": {
+                "source_type": "unknown",
+                "citation": "待内容编辑复核的录入底本",
+                "license": "needs-review",
+                "verification_status": "unverified",
+            },
+        }
+        self.store.import_poems(DEFAULT_PROJECT_ID, [record], actor=self.actor)
+        with self.assertRaises(WorkflowError) as blocked:
+            self.store.approve_content("test-source-gate-poem", actor=self.actor)
+        self.assertEqual(blocked.exception.code, "SOURCE_VERIFICATION_REQUIRED")
+
+        verified = self.store.update_poem_source(
+            "test-source-gate-poem",
+            {
+                "source_type": "public_domain",
+                "citation": "公共领域底本，内容编辑完成逐句复核",
+                "license": "Public Domain",
+                "verification_status": "verified",
+                "verified_at": "2026-07-18",
+            },
+            actor=self.actor,
+        )
+        self.assertEqual(verified["version"], 2)
+        approved = self.store.approve_content("test-source-gate-poem", actor=self.actor)
+        self.assertEqual(approved["status"], "requirement_draft")
 
     def test_batch_estimate_execution_attempts_and_partial_failure(self):
         direction_id = self.ready_poem()
