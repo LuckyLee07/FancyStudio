@@ -36,7 +36,17 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
+
+DEFAULT_PROJECT_ID = "tang-poems-baseline"
+DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
+QC_KEYS = {
+    "poem_relevance",
+    "period_accuracy",
+    "series_consistency",
+    "visual_integrity",
+    "layout_safety",
+}
 
 
 def utc_now() -> str:
@@ -66,9 +76,49 @@ class StudioStore:
         self.styles = read_json(STYLES_FILE, [])
         self.poem_by_id = {item["id"]: item for item in self.poems}
         self.style_by_id = {item["id"]: item for item in self.styles}
-        state = read_json(STATE_FILE, {"jobs": [], "images": []})
+        state = read_json(STATE_FILE, {"projects": [], "jobs": [], "images": []})
+        self.projects = state.get("projects", [])
         self.jobs = state.get("jobs", [])
         self.images = state.get("images", [])
+        if not self.projects:
+            self.projects.append(
+                {
+                    "id": DEFAULT_PROJECT_ID,
+                    "name": "唐诗十首 · 视觉基线",
+                    "purpose": "诗画卡片",
+                    "poem_ids": [item["id"] for item in self.poems],
+                    "style_id": "light-gongbi",
+                    "aspect_ratio": "portrait",
+                    "status": "in_progress",
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                }
+            )
+        project_ids = {item["id"] for item in self.projects}
+        fallback_project_id = self.projects[0]["id"]
+        for image in self.images:
+            if image.get("project_id") not in project_ids:
+                image["project_id"] = fallback_project_id
+            image_project = next(
+                (
+                    project
+                    for project in self.projects
+                    if project["id"] == image.get("project_id")
+                ),
+                self.projects[0],
+            )
+            image.setdefault("project_name", image_project["name"])
+            image.setdefault("generation_mode", "explore")
+            image.setdefault("parent_image_id", None)
+            image.setdefault("decision", "selected" if image.get("favorite") else "candidate")
+            image.setdefault("feedback_tags", [])
+            image.setdefault("review_note", "")
+            image.setdefault("qc", {})
+        for job in self.jobs:
+            if job.get("project_id") not in project_ids:
+                job["project_id"] = fallback_project_id
+            job.setdefault("generation_mode", "explore")
+            job.setdefault("parent_image_id", None)
         for job in self.jobs:
             if job.get("status") in {"queued", "running"}:
                 job["status"] = "failed"
@@ -78,16 +128,37 @@ class StudioStore:
 
     def persist(self) -> None:
         with self.lock:
-            atomic_write_json(STATE_FILE, {"jobs": self.jobs, "images": self.images})
+            atomic_write_json(
+                STATE_FILE,
+                {"projects": self.projects, "jobs": self.jobs, "images": self.images},
+            )
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
                 "poems": self.poems,
                 "styles": self.styles,
+                "projects": self.projects,
                 "images": list(reversed(self.images[-200:])),
                 "jobs": list(reversed(self.jobs[-30:])),
             }
+
+    def add_project(self, project: dict[str, Any]) -> None:
+        with self.lock:
+            self.projects.append(project)
+            self.persist()
+
+    def update_project(self, project_id: str, **updates: Any) -> dict[str, Any] | None:
+        with self.lock:
+            project = next(
+                (item for item in self.projects if item["id"] == project_id), None
+            )
+            if not project:
+                return None
+            project.update(updates)
+            project["updated_at"] = utc_now()
+            self.persist()
+            return project
 
     def add_job(self, job: dict[str, Any]) -> None:
         with self.lock:
@@ -128,11 +199,39 @@ def provider_name() -> str:
     return requested
 
 
-def build_prompt(poem: dict[str, Any], style: dict[str, Any], custom_note: str) -> str:
+def build_prompt(
+    poem: dict[str, Any],
+    style: dict[str, Any],
+    custom_note: str,
+    workflow: dict[str, Any] | None = None,
+) -> str:
     lines = "，".join(poem["lines"])
     constraints = "、".join(poem.get("avoid", []))
     note = custom_note.strip()
     note_block = f"\nAdditional art direction: {note}" if note else ""
+    workflow = workflow or {}
+    mode = workflow.get("generation_mode", "explore")
+    if mode == "converge":
+        preserve = "、".join(workflow.get("preserve", [])) or "整体风格与主体关系"
+        workflow_block = (
+            "\nIteration mode: converge from the approved parent candidate. "
+            f"Preserve: {preserve}. Change only the explicitly requested areas."
+        )
+    else:
+        directions = workflow.get("exploration_directions") or [
+            "诗意远景",
+            "主体叙事",
+            "意象留白",
+            "空间层次",
+        ]
+        workflow_block = (
+            "\nExploration mode: propose a clearly differentiated art-direction route. "
+            f"Possible route: {directions[workflow.get('sample_index', 0) % len(directions)]}."
+        )
+    project_block = (
+        f"\nSeries brief: {workflow.get('project_name', '唐诗插图系列')}，"
+        f"intended for {workflow.get('purpose', '诗画内容发布')}。"
+    )
     return (
         "Create an original editorial illustration inspired by a classical Tang poem.\n"
         f"Poem: {poem['title']} by {poem['author']} ({lines}).\n"
@@ -143,6 +242,7 @@ def build_prompt(poem: dict[str, Any], style: dict[str, Any], custom_note: str) 
         "period-plausible Tang-dynasty setting, and useful breathing room.\n"
         f"Avoid: {constraints}; anachronisms; no text; no generated letters; calligraphy; captions; "
         "logos; watermarks; recognizable living-artist or protected studio styles."
+        f"{project_block}{workflow_block}"
         f"{note_block}"
     )
 
@@ -344,6 +444,103 @@ def generate_openai_image(
     raise RuntimeError("图像接口响应中缺少 b64_json 或 url。")
 
 
+def _encode_multipart(
+    fields: dict[str, str], file_field: str, file_path: Path
+) -> tuple[bytes, str]:
+    boundary = f"----TangPoemStudio{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    chunks.extend(
+        [
+            f"--{boundary}\r\n".encode(),
+            (
+                f'Content-Disposition: form-data; name="{file_field}"; '
+                f'filename="{file_path.name}"\r\n'
+            ).encode(),
+            f"Content-Type: {content_type}\r\n\r\n".encode(),
+            file_path.read_bytes(),
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    return b"".join(chunks), boundary
+
+
+def edit_openai_image(
+    output: Path,
+    prompt: str,
+    aspect_ratio: str,
+    parent_path: Path,
+) -> None:
+    """Create a high-fidelity edit using the selected parent candidate."""
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("未设置 OPENAI_API_KEY，无法使用真实图像编辑。")
+    if parent_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise RuntimeError("真实收敛迭代需要 PNG、JPEG 或 WebP 父候选，请先选择 AI 样图或真实生成图。")
+    size_by_ratio = {
+        "portrait": "1024x1536",
+        "square": "1024x1024",
+        "landscape": "1536x1024",
+    }
+    body, boundary = _encode_multipart(
+        {
+            "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+            "prompt": prompt,
+            "size": size_by_ratio.get(aspect_ratio, "1024x1536"),
+            "quality": os.getenv("OPENAI_IMAGE_QUALITY", "medium"),
+            "output_format": "png",
+        },
+        "image[]",
+        parent_path,
+    )
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/images/edits",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": f"tang-poem-studio/{APP_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="replace")
+        try:
+            message = json.loads(body_text).get("error", {}).get("message", body_text)
+        except json.JSONDecodeError:
+            message = body_text
+        raise RuntimeError(f"OpenAI 图像编辑接口返回 {exc.code}: {message}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"无法连接图像编辑接口：{exc.reason}") from exc
+    data = result.get("data") or []
+    if not data or not data[0].get("b64_json"):
+        raise RuntimeError("图像编辑接口没有返回可保存的图片数据。")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(base64.b64decode(data[0]["b64_json"]))
+
+
+def local_image_path(image: dict[str, Any]) -> Path:
+    url = str(image.get("url", ""))
+    if url.startswith("/generated/"):
+        return GENERATED_DIR / Path(url).name
+    if url.startswith("/samples/"):
+        return PUBLIC_DIR / "samples" / Path(url).name
+    raise RuntimeError("父候选不是可读取的本地图片。")
+
+
 def create_image_record(
     job_id: str,
     poem: dict[str, Any],
@@ -352,16 +549,38 @@ def create_image_record(
     provider: str,
     aspect_ratio: str,
     custom_note: str,
+    project: dict[str, Any],
+    generation_mode: str = "explore",
+    parent_image_id: str | None = None,
+    preserve: list[str] | None = None,
 ) -> dict[str, Any]:
     image_id = uuid.uuid4().hex
     extension = "svg" if provider == "demo" else "png"
     filename = f"{image_id}.{extension}"
     output = GENERATED_DIR / filename
-    prompt = build_prompt(poem, style, custom_note)
+    workflow = {
+        "project_name": project["name"],
+        "purpose": project.get("purpose", "诗画内容发布"),
+        "generation_mode": generation_mode,
+        "parent_image_id": parent_image_id,
+        "preserve": preserve or [],
+        "sample_index": index,
+    }
+    prompt = build_prompt(poem, style, custom_note, workflow)
     if provider == "demo":
         render_demo_svg(output, poem, style, index)
     elif provider == "openai":
-        generate_openai_image(output, prompt, aspect_ratio)
+        if generation_mode == "converge" and parent_image_id:
+            assert STORE is not None
+            parent = next(
+                (item for item in STORE.images if item["id"] == parent_image_id),
+                None,
+            )
+            if not parent:
+                raise RuntimeError("父候选不存在，无法执行收敛迭代。")
+            edit_openai_image(output, prompt, aspect_ratio, local_image_path(parent))
+        else:
+            generate_openai_image(output, prompt, aspect_ratio)
     else:
         raise RuntimeError(f"不支持的 AI_PROVIDER：{provider}")
     return {
@@ -372,10 +591,18 @@ def create_image_record(
         "author": poem["author"],
         "style_id": style["id"],
         "style_name": style["name"],
+        "project_id": project["id"],
+        "project_name": project["name"],
         "provider": provider,
         "url": f"/generated/{filename}",
         "aspect_ratio": aspect_ratio,
         "prompt": prompt,
+        "generation_mode": generation_mode,
+        "parent_image_id": parent_image_id,
+        "decision": "candidate",
+        "feedback_tags": [],
+        "review_note": "",
+        "qc": {},
         "favorite": False,
         "created_at": utc_now(),
     }
@@ -391,6 +618,12 @@ def run_generation_job(job_id: str) -> None:
         count = job["count"]
         ratio = job["aspect_ratio"]
         note = job.get("custom_note", "")
+        project = next(
+            item for item in STORE.projects if item["id"] == job["project_id"]
+        )
+        generation_mode = job.get("generation_mode", "explore")
+        parent_image_id = job.get("parent_image_id")
+        preserve = job.get("preserve", [])
     STORE.update_job(job_id, status="running", started_at=utc_now(), progress=0)
     image_ids: list[str] = []
     try:
@@ -398,7 +631,17 @@ def run_generation_job(job_id: str) -> None:
             if provider == "demo":
                 time.sleep(0.35)
             record = create_image_record(
-                job_id, poem, style, index + int(time.time()), provider, ratio, note
+                job_id,
+                poem,
+                style,
+                index + int(time.time()),
+                provider,
+                ratio,
+                note,
+                project,
+                generation_mode,
+                parent_image_id,
+                preserve,
             )
             STORE.add_image(record)
             image_ids.append(record["id"])
@@ -445,6 +688,7 @@ def seed_demo_gallery() -> None:
             "demo",
             "portrait",
             "",
+            STORE.projects[0],
         )
         record["is_seed"] = True
         STORE.add_image(record)
@@ -469,10 +713,26 @@ def seed_demo_gallery() -> None:
                 "author": poem["author"],
                 "style_id": style_id,
                 "style_name": style["name"],
+                "project_id": STORE.projects[0]["id"],
+                "project_name": STORE.projects[0]["name"],
                 "provider": "sample",
                 "url": f"/samples/{filename}",
                 "aspect_ratio": "portrait",
-                "prompt": build_prompt(poem, style, ""),
+                "prompt": build_prompt(
+                    poem,
+                    style,
+                    "",
+                    {
+                        "project_name": STORE.projects[0]["name"],
+                        "purpose": STORE.projects[0]["purpose"],
+                    },
+                ),
+                "generation_mode": "explore",
+                "parent_image_id": None,
+                "decision": "candidate",
+                "feedback_tags": [],
+                "review_note": "",
+                "qc": {},
                 "favorite": False,
                 "is_seed": True,
                 "created_at": utc_now(),
@@ -595,6 +855,40 @@ class StudioHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         assert STORE is not None
         path = urlparse(self.path).path
+        if path == "/api/projects":
+            try:
+                body = self._read_json()
+                name = str(body.get("name", "")).strip()[:80]
+                purpose = str(body.get("purpose", "诗画卡片")).strip()[:40]
+                poem_ids = body.get("poem_ids") or [item["id"] for item in STORE.poems]
+                poem_ids = [str(item) for item in poem_ids]
+                style_id = str(body.get("style_id", STORE.styles[0]["id"]))
+                aspect_ratio = str(body.get("aspect_ratio", "portrait"))
+                if not name:
+                    raise ValueError("请填写项目名称。")
+                if not poem_ids or any(item not in STORE.poem_by_id for item in poem_ids):
+                    raise ValueError("项目包含无效诗词。")
+                if style_id not in STORE.style_by_id:
+                    raise ValueError("请选择有效风格。")
+                if aspect_ratio not in {"portrait", "square", "landscape"}:
+                    raise ValueError("不支持的画面比例。")
+            except (ValueError, TypeError) as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            project = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "purpose": purpose,
+                "poem_ids": poem_ids,
+                "style_id": style_id,
+                "aspect_ratio": aspect_ratio,
+                "status": "in_progress",
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+            STORE.add_project(project)
+            self._send_json({"project": project}, HTTPStatus.CREATED)
+            return
         if path != "/api/generate":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -605,6 +899,17 @@ class StudioHandler(BaseHTTPRequestHandler):
             count = int(body.get("count", 1))
             aspect_ratio = str(body.get("aspect_ratio", "portrait"))
             custom_note = str(body.get("custom_note", ""))[:500]
+            project_id = str(body.get("project_id", STORE.projects[0]["id"]))
+            generation_mode = str(body.get("generation_mode", "explore"))
+            parent_image_id = body.get("parent_image_id")
+            parent_image_id = str(parent_image_id) if parent_image_id else None
+            preserve = body.get("preserve") or []
+            preserve = [str(item)[:40] for item in preserve][:6]
+            project = next(
+                (item for item in STORE.projects if item["id"] == project_id), None
+            )
+            if not project:
+                raise ValueError("请选择有效项目。")
             if poem_id not in STORE.poem_by_id:
                 raise ValueError("请选择有效诗词。")
             if style_id not in STORE.style_by_id:
@@ -613,6 +918,15 @@ class StudioHandler(BaseHTTPRequestHandler):
                 raise ValueError("单次可生成 1–4 张。")
             if aspect_ratio not in {"portrait", "square", "landscape"}:
                 raise ValueError("不支持的画面比例。")
+            if generation_mode not in {"explore", "converge"}:
+                raise ValueError("不支持的创作模式。")
+            if generation_mode == "converge":
+                parent = next(
+                    (item for item in STORE.images if item["id"] == parent_image_id),
+                    None,
+                )
+                if not parent or parent.get("project_id") != project_id:
+                    raise ValueError("收敛迭代需要选择本项目中的参考候选图。")
         except (ValueError, TypeError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -626,6 +940,11 @@ class StudioHandler(BaseHTTPRequestHandler):
             "count": count,
             "aspect_ratio": aspect_ratio,
             "custom_note": custom_note,
+            "project_id": project_id,
+            "project_name": project["name"],
+            "generation_mode": generation_mode,
+            "parent_image_id": parent_image_id,
+            "preserve": preserve,
             "status": "queued",
             "progress": 0,
             "image_ids": [],
@@ -643,6 +962,24 @@ class StudioHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802
         assert STORE is not None
         path = urlparse(self.path).path
+        project_match = re.fullmatch(r"/api/projects/([a-z0-9-]{3,64})", path)
+        if project_match:
+            try:
+                body = self._read_json()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            updates = {}
+            if "status" in body and body["status"] in {"in_progress", "completed", "archived"}:
+                updates["status"] = body["status"]
+            if "style_id" in body and body["style_id"] in STORE.style_by_id:
+                updates["style_id"] = body["style_id"]
+            project = STORE.update_project(project_match.group(1), **updates)
+            if not project:
+                self._send_json({"error": "项目不存在。"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"project": project})
+            return
         match = re.fullmatch(r"/api/images/([a-f0-9]{32})", path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -657,6 +994,35 @@ class StudioHandler(BaseHTTPRequestHandler):
             updates["favorite"] = bool(body["favorite"])
         if "hidden" in body:
             updates["hidden"] = bool(body["hidden"])
+        if "decision" in body:
+            decision = str(body["decision"])
+            if decision not in DECISION_VALUES:
+                self._send_json({"error": "无效的评审结论。"}, HTTPStatus.BAD_REQUEST)
+                return
+            if decision == "final":
+                current = next(
+                    (item for item in STORE.images if item["id"] == match.group(1)),
+                    None,
+                )
+                qc_candidate = body.get("qc") if isinstance(body.get("qc"), dict) else (current or {}).get("qc", {})
+                if not all(bool(qc_candidate.get(key)) for key in QC_KEYS):
+                    self._send_json(
+                        {"error": "完成全部五项美术质检后才能标记为成品。"},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+            updates["decision"] = decision
+            updates["favorite"] = decision in {"selected", "final"}
+        if "feedback_tags" in body:
+            values = body["feedback_tags"] if isinstance(body["feedback_tags"], list) else []
+            updates["feedback_tags"] = [str(item)[:40] for item in values][:8]
+        if "review_note" in body:
+            updates["review_note"] = str(body["review_note"])[:500]
+        if "qc" in body:
+            values = body["qc"] if isinstance(body["qc"], dict) else {}
+            updates["qc"] = {
+                key: bool(value) for key, value in values.items() if key in QC_KEYS
+            }
         if not updates:
             self._send_json({"error": "没有可更新的字段。"}, HTTPStatus.BAD_REQUEST)
             return

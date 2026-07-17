@@ -3,12 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="唐诗绘卷：从诗意解析到多风格插图生成与展示的本地 AI 工作台。"
-    />
+    <meta name="description" content="唐诗绘卷：从视觉基线、方向探索到美术验收与交付的 AI 插图 SOP 工作台。" />
     <meta name="theme-color" content="#f2eee5" />
-    <title>唐诗绘卷 · AI 插图工作台</title>
+    <title>唐诗绘卷 · AI 插图 SOP 工作台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -16,303 +13,133 @@
       <aside class="sidebar" aria-label="主导航">
         <a class="brand" href="#today" aria-label="唐诗绘卷首页">
           <span class="brand-mark" aria-hidden="true">绘</span>
-          <span class="brand-copy">
-            <strong>唐诗绘卷</strong>
-            <small>AI Illustration Studio</small>
-          </span>
+          <span class="brand-copy"><strong>唐诗绘卷</strong><small>Illustration SOP Studio</small></span>
         </a>
-
         <nav class="primary-nav">
-          <button class="nav-item is-active" data-view="today" type="button">
-            <span class="nav-icon" aria-hidden="true">◫</span>
-            <span>今日工作台</span>
-          </button>
-          <button class="nav-item" data-view="poems" type="button">
-            <span class="nav-icon" aria-hidden="true">诗</span>
-            <span>诗词库</span>
-          </button>
-          <button class="nav-item" data-view="styles" type="button">
-            <span class="nav-icon" aria-hidden="true">彩</span>
-            <span>风格库</span>
-          </button>
-          <button class="nav-item" data-view="gallery" type="button">
-            <span class="nav-icon" aria-hidden="true">▦</span>
-            <span>作品画廊</span>
-          </button>
+          <button class="nav-item is-active" data-view="today" type="button"><span class="nav-icon">作</span><span>创作台</span></button>
+          <button class="nav-item" data-view="projects" type="button"><span class="nav-icon">卷</span><span>项目</span></button>
+          <button class="nav-item" data-view="poems" type="button"><span class="nav-icon">诗</span><span>诗词库</span></button>
+          <button class="nav-item" data-view="styles" type="button"><span class="nav-icon">彩</span><span>风格基线</span></button>
+          <button class="nav-item" data-view="gallery" type="button"><span class="nav-icon">审</span><span>评审画廊</span></button>
         </nav>
-
         <div class="sidebar-footer">
-          <div class="provider-card" id="provider-card">
-            <span class="status-dot" aria-hidden="true"></span>
-            <div>
-              <small>图像引擎</small>
-              <strong id="provider-label">连接中…</strong>
-            </div>
-          </div>
-          <button class="quiet-button" id="open-help" type="button">
-            <span aria-hidden="true">?</span> 使用说明
-          </button>
+          <div class="provider-card" id="provider-card"><span class="status-dot"></span><div><small>图像引擎</small><strong id="provider-label">连接中…</strong></div></div>
+          <button class="quiet-button" id="open-help" type="button"><span>?</span> SOP 说明</button>
         </div>
       </aside>
 
       <div class="workspace">
         <header class="topbar">
-          <div>
-            <p class="eyebrow" id="page-eyebrow">今日工作台</p>
-            <h1 id="page-title">把诗意，变成一套画</h1>
-          </div>
+          <div><p class="eyebrow" id="page-eyebrow">今日创作台</p><h1 id="page-title">从方向到成品，每一步都有依据</h1></div>
           <div class="topbar-actions">
-            <button class="jobs-button" id="jobs-button" type="button">
-              <span class="pulse-icon" aria-hidden="true"></span>
-              生成任务
-              <span class="count-badge" id="active-job-count">0</span>
-            </button>
-            <button class="primary-button compact" data-jump-to-generator type="button">
-              <span aria-hidden="true">✦</span> 开始创作
-            </button>
+            <label class="project-switcher"><span>当前项目</span><select id="project-switcher" aria-label="切换当前项目"></select></label>
+            <button class="jobs-button" id="jobs-button" type="button"><span class="pulse-icon"></span>生成任务<span class="count-badge" id="active-job-count">0</span></button>
+            <button class="primary-button compact" data-jump-to-generator type="button"><span>✦</span> 继续创作</button>
           </div>
         </header>
 
         <main>
           <section class="view is-active" id="view-today" data-view-panel="today">
-            <section class="hero-panel">
-              <div class="hero-copy">
-                <span class="season-chip">夏 · 荷风入画</span>
-                <h2>从一首诗出发，<br /><em>寻找它的画面。</em></h2>
-                <p>
-                  选择诗词与美术风格，系统会自动编译画面策划并生成插图。作品会保留诗词、风格与生成记录。
-                </p>
-                <button class="ink-button" data-jump-to-generator type="button">
-                  创建一组插图 <span aria-hidden="true">→</span>
-                </button>
+            <section class="project-hero">
+              <div class="project-hero-copy">
+                <p class="eyebrow">ACTIVE SERIES</p>
+                <span class="project-status-chip">进行中 · 系列创作</span>
+                <h2 id="active-project-name">唐诗十首 · 视觉基线</h2>
+                <p id="active-project-brief">先统一视觉语言，再逐首探索、收敛与验收。</p>
+                <div class="project-progress-row"><div class="project-progress"><span id="project-progress-bar"></span></div><strong id="project-progress-copy">0 / 10 首完成</strong></div>
               </div>
-              <div class="hero-art" aria-hidden="true">
-                <div class="hero-sun"></div>
-                <div class="hero-mountain hero-mountain-back"></div>
-                <div class="hero-mountain hero-mountain-front"></div>
-                <div class="hero-boat"><span></span></div>
-                <div class="hero-caption">山色入空濛</div>
+              <div class="project-hero-art" aria-hidden="true">
+                <img src="/samples/jing-ye-si-light-gongbi.png" alt="" />
+                <div class="project-art-caption"><span>风格基线</span><strong id="project-style-name">清雅淡彩工笔</strong></div>
               </div>
             </section>
 
-            <section class="stats-row" aria-label="作品统计">
-              <article class="stat-card">
-                <span>已生成作品</span>
-                <strong id="stat-images">—</strong>
-                <small>本地作品库</small>
-              </article>
-              <article class="stat-card">
-                <span>覆盖诗词</span>
-                <strong id="stat-poems">—</strong>
-                <small>首唐诗已有画面</small>
-              </article>
-              <article class="stat-card">
-                <span>可用风格</span>
-                <strong id="stat-styles">—</strong>
-                <small>套原创视觉方向</small>
-              </article>
-              <article class="stat-card stat-card-accent">
-                <span>收藏灵感</span>
-                <strong id="stat-favorites">—</strong>
-                <small>张候选被标记</small>
-              </article>
+            <section class="sop-section" aria-labelledby="sop-title">
+              <div class="section-heading"><div><p class="eyebrow">CREATIVE SOP</p><h2 id="sop-title">本项目下一步</h2></div><p>系统根据当前资产自动判断阶段，减少来回猜测。</p></div>
+              <div class="sop-rail" id="sop-rail"></div>
+            </section>
+
+            <section class="stats-row" aria-label="项目统计">
+              <article class="stat-card"><span>待评审</span><strong id="stat-candidates">—</strong><small>张候选等待决策</small></article>
+              <article class="stat-card"><span>已入选方向</span><strong id="stat-selected">—</strong><small>张进入收敛阶段</small></article>
+              <article class="stat-card"><span>系列覆盖</span><strong id="stat-poems">—</strong><small>首诗已经开始创作</small></article>
+              <article class="stat-card stat-card-accent"><span>可交付成品</span><strong id="stat-final">—</strong><small>张已通过完整质检</small></article>
             </section>
 
             <section class="studio-section" id="generator">
-              <div class="section-heading">
-                <div>
-                  <p class="eyebrow">AI 画面工坊</p>
-                  <h2>创建新插图</h2>
-                </div>
-                <p>三步完成创作，生成后会自动加入作品画廊。</p>
+              <div class="section-heading"><div><p class="eyebrow">ART DIRECTION DESK</p><h2>创建下一轮</h2></div><p>先决定是探索新方向，还是围绕入选候选继续收敛。</p></div>
+              <div class="mode-switch" role="radiogroup" aria-label="创作模式">
+                <label><input type="radio" name="generation_mode" value="explore" checked /><span><strong>探索方向</strong><small>生成差异明显的构图提案</small></span></label>
+                <label><input type="radio" name="generation_mode" value="converge" /><span><strong>收敛迭代</strong><small>锁定父候选，只修改明确问题</small></span></label>
               </div>
-
               <div class="generator-grid">
                 <form class="generator-form" id="generator-form">
-                  <fieldset>
-                    <legend><span>01</span> 选择诗词</legend>
-                    <label class="select-field">
-                      <span class="sr-only">选择诗词</span>
-                      <select id="poem-select" name="poem_id" required></select>
-                    </label>
+                  <fieldset><legend><span>01</span> 选择诗词与风格</legend>
+                    <div class="option-row"><label class="field-group"><span>本轮诗词</span><select id="poem-select" name="poem_id" required></select></label><label class="field-group"><span>系列风格</span><select id="style-select" name="style_id" required></select></label></div>
                     <div class="poem-preview" id="poem-preview"></div>
                   </fieldset>
-
-                  <fieldset>
-                    <legend><span>02</span> 选择美术风格</legend>
-                    <div class="style-picker" id="style-picker"></div>
+                  <fieldset id="converge-fieldset" hidden><legend><span>02</span> 锁定参考候选</legend>
+                    <label class="field-group"><span>父候选图</span><select id="parent-image-select"><option value="">请选择已入选候选</option></select></label>
+                    <div class="preserve-group"><span>本轮必须保留</span><div class="check-chip-row" id="preserve-options">
+                      <label><input type="checkbox" value="构图层级" checked /><span>构图层级</span></label><label><input type="checkbox" value="人物设定" /><span>人物设定</span></label><label><input type="checkbox" value="色彩关系" checked /><span>色彩关系</span></label><label><input type="checkbox" value="光影氛围" /><span>光影氛围</span></label>
+                    </div></div>
                   </fieldset>
-
-                  <fieldset>
-                    <legend><span>03</span> 设置本轮生成</legend>
-                    <div class="option-row">
-                      <label class="field-group">
-                        <span>画面比例</span>
-                        <select id="ratio-select" name="aspect_ratio">
-                          <option value="portrait">竖版 2:3</option>
-                          <option value="square">方形 1:1</option>
-                          <option value="landscape">横版 3:2</option>
-                        </select>
-                      </label>
-                      <label class="field-group">
-                        <span>生成数量</span>
-                        <select id="count-select" name="count">
-                          <option value="1">1 张</option>
-                          <option value="2" selected>2 张</option>
-                          <option value="3">3 张</option>
-                          <option value="4">4 张</option>
-                        </select>
-                      </label>
-                    </div>
-                    <label class="field-group direction-field">
-                      <span>补充画面要求 <small>可选</small></span>
-                      <textarea
-                        id="custom-note"
-                        name="custom_note"
-                        maxlength="500"
-                        rows="3"
-                        placeholder="例如：减少人物，保留左上区域用于排版…"
-                      ></textarea>
-                    </label>
+                  <fieldset><legend><span id="settings-step-number">02</span> 设置本轮产出</legend>
+                    <div class="option-row"><label class="field-group"><span>交付画幅</span><select id="ratio-select"><option value="portrait">竖版 2:3</option><option value="square">方形 1:1</option><option value="landscape">横版 3:2</option></select></label><label class="field-group"><span>候选数量</span><select id="count-select"><option value="1">1 张</option><option value="2">2 张</option><option value="3" selected>3 张</option><option value="4">4 张</option></select></label></div>
+                    <label class="field-group direction-field"><span id="direction-label">补充探索要求 <small>可选</small></span><textarea id="custom-note" maxlength="500" rows="3" placeholder="例如：同一诗意分别尝试远景、主体叙事与意象留白…"></textarea></label>
                   </fieldset>
-
-                  <button class="generate-button" id="generate-button" type="submit">
-                    <span class="spark" aria-hidden="true">✦</span>
-                    <span class="generate-copy">
-                      <strong>生成这组插图</strong>
-                      <small id="generate-mode-copy">正在检测图像引擎…</small>
-                    </span>
-                    <span class="arrow" aria-hidden="true">→</span>
-                  </button>
+                  <button class="generate-button" id="generate-button" type="submit"><span class="spark">✦</span><span class="generate-copy"><strong id="generate-button-title">生成探索候选</strong><small id="generate-mode-copy">正在检测图像引擎…</small></span><span class="arrow">→</span></button>
                 </form>
-
                 <aside class="art-direction-card">
-                  <div class="art-direction-visual" id="art-direction-visual">
-                    <span class="visual-moon"></span>
-                    <span class="visual-ridge ridge-one"></span>
-                    <span class="visual-ridge ridge-two"></span>
-                    <span class="visual-person"></span>
-                  </div>
-                  <div class="art-direction-content">
-                    <span class="mini-label">本轮画面策划</span>
-                    <h3 id="direction-title">月光入室</h3>
-                    <p id="direction-copy">选择一首诗后，这里会显示系统整理的视觉命题。</p>
-                    <div class="direction-tags" id="direction-tags"></div>
-                  </div>
+                  <div class="art-direction-visual" id="art-direction-visual"><span class="visual-moon"></span><span class="visual-ridge ridge-one"></span><span class="visual-ridge ridge-two"></span><span class="visual-person"></span></div>
+                  <div class="art-direction-content"><span class="mini-label">本轮美术命题</span><h3 id="direction-title">月光入室</h3><p id="direction-copy">选择一首诗后，这里会显示系统整理的视觉命题。</p><div class="direction-tags" id="direction-tags"></div><div class="art-director-note" id="art-director-note">探索阶段应优先拉开构图差异，不追求微小细节变化。</div></div>
                 </aside>
               </div>
             </section>
 
-            <section class="recent-section">
-              <div class="section-heading inline-heading">
-                <div>
-                  <p class="eyebrow">RECENT CREATIONS</p>
-                  <h2>最近作品</h2>
-                </div>
-                <button class="text-button" data-switch-view="gallery" type="button">查看全部 <span>→</span></button>
-              </div>
-              <div class="art-grid art-grid-recent" id="recent-grid"></div>
-            </section>
+            <section class="recent-section"><div class="section-heading inline-heading"><div><p class="eyebrow">REVIEW QUEUE</p><h2>待评审候选</h2></div><button class="text-button" data-switch-view="gallery" type="button">进入评审画廊 <span>→</span></button></div><div class="art-grid art-grid-recent" id="recent-grid"></div></section>
+          </section>
+
+          <section class="view" id="view-projects" data-view-panel="projects">
+            <div class="page-intro"><div><p class="eyebrow">SERIES PROJECTS</p><h2>项目</h2><p>每个项目锁定用途、诗词范围、画幅和风格版本，是系列一致性的边界。</p></div><button class="primary-button" id="new-project-button" type="button">＋ 新建项目</button></div>
+            <div class="project-list" id="project-list"></div>
           </section>
 
           <section class="view" id="view-poems" data-view-panel="poems">
-            <div class="page-intro">
-              <div>
-                <p class="eyebrow">POEM LIBRARY</p>
-                <h2>诗词库</h2>
-                <p>每首诗都带有意象、情绪和画面策划，可直接进入创作。</p>
-              </div>
-              <div class="search-box">
-                <span aria-hidden="true">⌕</span>
-                <input id="poem-search" type="search" placeholder="搜索诗名、作者或主题" />
-              </div>
-            </div>
-            <div class="poem-library" id="poem-library"></div>
+            <div class="page-intro"><div><p class="eyebrow">POEM LIBRARY</p><h2>诗词库</h2><p>每首诗都带有意象、情绪、避错项和画面策划。</p></div><div class="search-box"><span>⌕</span><input id="poem-search" type="search" placeholder="搜索诗名、作者或主题" /></div></div><div class="poem-library" id="poem-library"></div>
           </section>
 
           <section class="view" id="view-styles" data-view-panel="styles">
-            <div class="page-intro">
-              <div>
-                <p class="eyebrow">STYLE LIBRARY</p>
-                <h2>风格库</h2>
-                <p>六套原创视觉方向，每一套都有固定色板、材质和画面语言。</p>
-              </div>
-            </div>
-            <div class="style-library" id="style-library"></div>
+            <div class="page-intro"><div><p class="eyebrow">VISUAL BASELINES</p><h2>风格基线</h2><p>色板、材质、构图原则与反例共同定义一套风格，而不只是提示词。</p></div></div><div class="style-library" id="style-library"></div>
           </section>
 
           <section class="view" id="view-gallery" data-view-panel="gallery">
-            <div class="page-intro gallery-intro">
-              <div>
-                <p class="eyebrow">ARTWORK GALLERY</p>
-                <h2>作品画廊</h2>
-                <p>浏览、收藏并回看每张插图的诗词、风格与提示词。</p>
-              </div>
-              <div class="gallery-controls">
-                <select id="gallery-style-filter" aria-label="按风格筛选">
-                  <option value="all">全部风格</option>
-                </select>
-                <button class="filter-chip" id="favorite-filter" type="button">♡ 只看收藏</button>
-              </div>
-            </div>
-            <div class="art-grid art-grid-gallery" id="gallery-grid"></div>
-            <div class="empty-state" id="gallery-empty" hidden>
-              <span>○</span>
-              <h3>还没有符合条件的作品</h3>
-              <p>换一个筛选条件，或回到工作台生成新插图。</p>
-            </div>
+            <div class="page-intro gallery-intro"><div><p class="eyebrow">ART REVIEW</p><h2>评审画廊</h2><p>快速做出入选、淘汰和成品决策，并保留每次修改依据。</p></div><div class="gallery-controls"><select id="gallery-project-filter" aria-label="按项目筛选"></select><select id="gallery-decision-filter" aria-label="按评审状态筛选"><option value="all">全部状态</option><option value="candidate">待评审</option><option value="selected">已入选</option><option value="final">已成品</option><option value="rejected">已淘汰</option></select><select id="gallery-style-filter" aria-label="按风格筛选"><option value="all">全部风格</option></select></div></div>
+            <div class="review-summary" id="review-summary"></div><div class="art-grid art-grid-gallery" id="gallery-grid"></div><div class="empty-state" id="gallery-empty" hidden><span>○</span><h3>还没有符合条件的作品</h3><p>换一个筛选条件，或回到创作台生成候选。</p></div>
           </section>
         </main>
       </div>
     </div>
 
-    <aside class="jobs-drawer" id="jobs-drawer" aria-label="生成任务" aria-hidden="true">
-      <div class="drawer-header">
-        <div>
-          <p class="eyebrow">GENERATION QUEUE</p>
-          <h2>生成任务</h2>
-        </div>
-        <button class="icon-button" id="close-jobs" type="button" aria-label="关闭任务面板">×</button>
-      </div>
-      <div class="job-list" id="job-list"></div>
-    </aside>
-    <div class="drawer-scrim" id="drawer-scrim" hidden></div>
+    <aside class="jobs-drawer" id="jobs-drawer" aria-label="生成任务" aria-hidden="true"><div class="drawer-header"><div><p class="eyebrow">GENERATION QUEUE</p><h2>生成任务</h2></div><button class="icon-button" id="close-jobs" type="button" aria-label="关闭任务面板">×</button></div><div class="job-list" id="job-list"></div></aside><div class="drawer-scrim" id="drawer-scrim" hidden></div>
 
     <dialog class="art-dialog" id="art-dialog">
       <button class="dialog-close" id="dialog-close" type="button" aria-label="关闭大图">×</button>
-      <div class="dialog-layout">
-        <div class="dialog-image-wrap">
-          <img id="dialog-image" alt="" />
+      <div class="dialog-layout"><div class="dialog-image-wrap"><img id="dialog-image" alt="" /><div class="lineage-badge" id="dialog-lineage"></div></div><div class="dialog-details">
+        <div class="dialog-scroll"><p class="eyebrow" id="dialog-style"></p><div class="dialog-title-row"><div><h2 id="dialog-title"></h2><p class="dialog-author" id="dialog-author"></p></div><span class="decision-badge" id="dialog-decision"></span></div><div class="dialog-poem" id="dialog-poem"></div><div class="dialog-meta" id="dialog-meta"></div>
+          <section class="review-panel"><div class="review-panel-head"><div><span class="mini-label">美术评审</span><h3>这张图下一步怎么走？</h3></div><span class="shortcut-hint">1 入选 · 2 淘汰</span></div><div class="decision-actions"><button data-set-decision="selected" type="button">✓ 入选方向</button><button data-set-decision="rejected" type="button">× 淘汰候选</button></div>
+            <div class="feedback-block"><span>需要调整</span><div class="check-chip-row" id="feedback-options"></div></div><label class="field-group"><span>评审备注</span><textarea id="review-note" rows="2" maxlength="500" placeholder="例如：人物比例保留，但月亮缩小 30%，增加江面留白…"></textarea></label><button class="secondary-button full-width" id="save-review" type="button">保存评审意见</button>
+          </section>
+          <section class="qc-panel"><div><span class="mini-label">交付门槛</span><h3>成品质检</h3></div><div class="qc-list" id="qc-list"></div><button class="finalize-button" id="finalize-image" type="button">完成 5 项质检后标记成品</button></section>
+          <details class="prompt-details"><summary>查看生成提示词</summary><p id="dialog-prompt"></p></details>
         </div>
-        <div class="dialog-details">
-          <p class="eyebrow" id="dialog-style"></p>
-          <h2 id="dialog-title"></h2>
-          <p class="dialog-author" id="dialog-author"></p>
-          <div class="dialog-poem" id="dialog-poem"></div>
-          <div class="dialog-meta" id="dialog-meta"></div>
-          <details class="prompt-details">
-            <summary>查看生成提示词</summary>
-            <p id="dialog-prompt"></p>
-          </details>
-          <div class="dialog-actions">
-            <button class="favorite-button" id="dialog-favorite" type="button">♡ 收藏灵感</button>
-            <a class="download-link" id="dialog-download" href="#" download>保存原图</a>
-          </div>
-        </div>
-      </div>
+        <div class="dialog-actions"><button class="favorite-button" id="dialog-iterate" type="button">↻ 以此图继续收敛</button><button class="secondary-button" id="dialog-export-card" type="button">导出诗画卡</button><a class="download-link" id="dialog-download" href="#" download>保存原图</a></div>
+      </div></div>
     </dialog>
 
-    <dialog class="help-dialog" id="help-dialog">
-      <button class="dialog-close" id="help-close" type="button" aria-label="关闭说明">×</button>
-      <p class="eyebrow">LOCAL STUDIO</p>
-      <h2>本地运行说明</h2>
-      <ol>
-        <li><strong>演示模式</strong>无需配置，所有图片保存在本机，适合体验流程和界面。</li>
-        <li><strong>真实生成</strong>在启动前设置 <code>OPENAI_API_KEY</code>，服务会自动切换至 OpenAI 图像接口。</li>
-        <li><strong>局域网访问</strong>使用 <code>python3 server.py --host 0.0.0.0</code> 启动，再通过本机局域网 IP 访问。</li>
-      </ol>
-      <p class="help-note">真实生成可能产生 API 费用。密钥只从本机环境变量读取，不会发送到浏览器。</p>
-    </dialog>
+    <dialog class="project-dialog" id="project-dialog"><button class="dialog-close" id="project-dialog-close" type="button">×</button><p class="eyebrow">NEW SERIES</p><h2>创建插图项目</h2><form id="project-form"><label class="field-group"><span>项目名称</span><input id="project-name" required maxlength="80" placeholder="例如：王维山水诗十首" /></label><div class="option-row"><label class="field-group"><span>交付用途</span><select id="project-purpose"><option>诗画卡片</option><option>儿童绘本</option><option>短视频分镜</option><option>展览海报</option></select></label><label class="field-group"><span>默认画幅</span><select id="project-ratio"><option value="portrait">竖版 2:3</option><option value="square">方形 1:1</option><option value="landscape">横版 3:2</option></select></label></div><label class="field-group"><span>默认风格</span><select id="project-style"></select></label><div class="project-poem-picker" id="project-poem-picker"></div><button class="primary-button full-width" type="submit">创建并进入项目</button></form></dialog>
+
+    <dialog class="help-dialog" id="help-dialog"><button class="dialog-close" id="help-close" type="button">×</button><p class="eyebrow">CREATIVE SOP</p><h2>从灵感到交付的五步</h2><ol><li><strong>定项目</strong>：明确用途、诗词范围、画幅与风格边界。</li><li><strong>立基线</strong>：先用代表诗确认色彩、笔触与构图语言。</li><li><strong>做探索</strong>：让候选方向真正拉开差异。</li><li><strong>再收敛</strong>：选定父候选，明确保留项和修改项。</li><li><strong>过质检</strong>：诗意、史实、一致性、画面完整和排版安全全部通过后再交付。</li></ol><p class="help-note">演示模式不会产生费用；设置 OPENAI_API_KEY 后会使用真实图像接口。所有项目、评审与版本记录保存在本机。</p></dialog>
 
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script src="/app.js" defer></script>
