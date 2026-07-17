@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from backup_service import create_backup, list_backups, verify_backup
+from direction_schema import schema_document as direction_schema_document
 from qc_engine import QC_VERSION, inspect_image
 from requirement_schema import schema_document as requirement_schema_document
 from sop_store import (
@@ -45,7 +46,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -1511,6 +1512,9 @@ class StudioHandler(BaseHTTPRequestHandler):
         if path == "/api/schemas/requirement-card":
             self._send_json(requirement_schema_document())
             return
+        if path == "/api/schemas/direction-proposal":
+            self._send_json(direction_schema_document())
+            return
         if path == "/api/requirement-generation-runs":
             try:
                 unresolved = query.get("unresolved", [""])[0].lower()
@@ -1533,6 +1537,32 @@ class StudioHandler(BaseHTTPRequestHandler):
                         {
                             "code": "INVALID_PAGINATION",
                             "message": "需求生成运行记录分页参数无效。",
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/direction-generation-runs":
+            try:
+                unresolved = query.get("unresolved", [""])[0].lower()
+                self._send_json(
+                    {
+                        "items": get_sop_store().direction_generation_runs(
+                            query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0],
+                            poem_id=query.get("poem_id", [None])[0],
+                            status=query.get("status", [None])[0],
+                            unresolved_only=unresolved in {"1", "true", "yes"},
+                            limit=int(query.get("limit", ["200"])[0]),
+                        )
+                    }
+                )
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_PAGINATION",
+                            "message": "方向生成运行记录分页参数无效。",
                         },
                         HTTPStatus.BAD_REQUEST,
                     )

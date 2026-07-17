@@ -1,9 +1,9 @@
 # 唐诗插图批量生产 SOP 系统｜TODO 迭代开发文档
 
-> 文档版本：v1.3  
-> 编写日期：2026-07-18  
-> 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档  
-> 当前代码基线：本地实施版 `v0.9.0`（待提交）  
+> 文档版本：v1.4
+> 编写日期：2026-07-18
+> 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档
+> 当前代码基线：本地实施版 `v0.10.0`
 > 文档状态：持续迭代中；以任务状态和自动化测试为准
 
 ---
@@ -408,13 +408,15 @@ flowchart LR
 
 ### 7.2 画面方向生成
 
-- [ ] P0 强制首轮 3 个方向在主体、景别或视觉叙事上至少两项不同；
+- [x] P0 强制首轮 3 个方向在主体、景别或视觉叙事上至少两项不同；三个方向作为一个原子集合校验，任一方向或任一两两组合失败均不写入半套结果；
 - [x] P0 方向类型默认包含叙事型、意境型、象征型；
-- [ ] P0 方向中必须区分“诗文事实”“合理演绎”“创意表达”；
+- [x] P0 方向中必须区分“诗文事实”“合理演绎”“创意表达”；诗文事实引用必须能在当前 ContentVersion 中定位；
 - [x] P0 方向被批准后冻结版本；修改创建新版本；进入生产后禁止回写；
 - [x] P0 将批准方向编译成模型无关的中间表示，再由 Provider Adapter 转成 Prompt；
 - [ ] P1 生成前做跨诗构图相似度规则检查；
 - [ ] P1 增加低成本草图模式验证构图。
+
+**v0.10.0 验收证据：** `schemas/direction-proposal.schema.json`、`direction_schema.py`、`direction_generation_runs`、三方向差异报告、方向板事实分层与异常重试、单诗方向运行记录，以及 `tests/test_direction_schema.py`。
 
 ### 7.3 风格包
 
@@ -570,6 +572,8 @@ flowchart LR
 - [x] `POST /api/requirements/generate`：批量创建需求生成任务；
 - [x] `GET /api/schemas/requirement-card`：读取当前 RequirementCard JSON Schema；
 - [x] `GET /api/requirement-generation-runs`：按诗词、状态和未解决条件查询需求生成运行记录；
+- [x] `GET /api/schemas/direction-proposal`：读取当前 DirectionProposal JSON Schema；
+- [x] `GET /api/direction-generation-runs`：按诗词、状态和未解决条件查询方向生成运行记录；
 - [x] `PATCH /api/requirements/:id`：编辑并创建新版本；
 - [x] `POST /api/requirements/:id/approve`：批准；
 - [x] `POST /api/requirements/:id/reject`：退回；
@@ -778,8 +782,8 @@ flowchart LR
 **负责人：AI / BE / FE｜依赖：EPIC-01、指令版本**
 
 - [x] E02-T01 Requirement Schema；
-- [-] E02-T02 Direction Schema；
-- [-] E02-T03 本地策划器调用、Schema 校验、一次修复、版本缓存和异常处理已完成；真实文本模型 Provider Adapter 待接入；
+- [x] E02-T02 Direction Schema、三方向原子集合和差异门禁；
+- [-] E02-T03 Requirement / Direction 本地策划器调用、Schema 校验、一次修复、版本缓存和异常处理已完成；真实文本模型 Provider Adapter 待接入；
 - [x] E02-T04 版本与状态转换；
 - [x] E02-T05 需求板；
 - [x] E02-T06 方向板；

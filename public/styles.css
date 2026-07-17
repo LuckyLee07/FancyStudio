@@ -1808,6 +1808,102 @@ input[type="checkbox"] {
   line-height: 1.65;
 }
 
+.direction-thesis {
+  margin: 17px 0 0;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+
+.direction-signature {
+  display: flex;
+  margin-top: 10px;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.direction-signature span {
+  padding: 4px 6px;
+  color: var(--cyan);
+  background: var(--cyan-soft);
+  border-radius: 5px;
+  font-family: ui-monospace, monospace;
+  font-size: 7px;
+}
+
+.interpretation-summary {
+  display: grid;
+  margin-top: 12px;
+  gap: 5px;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.interpretation-summary span {
+  padding: 6px;
+  color: var(--faint);
+  background: rgba(255, 255, 255, 0.025);
+  border-radius: 5px;
+  font-size: 7px;
+  text-align: center;
+}
+
+.interpretation-summary strong {
+  color: var(--text-soft);
+  font-family: ui-monospace, monospace;
+}
+
+.direction-contract-line {
+  margin: 10px 0 0;
+  color: var(--blue);
+  font-family: ui-monospace, monospace;
+  font-size: 7px;
+}
+
+.direction-generation-error {
+  display: flex;
+  margin-top: 14px;
+  padding: 12px 13px;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 113, 128, 0.17);
+  border-radius: 8px;
+}
+
+.direction-generation-error strong {
+  color: var(--red);
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
+}
+
+.direction-generation-error p,
+.direction-generation-error small {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.interpretation-editor {
+  display: grid;
+  padding: 14px;
+  gap: 10px;
+  background: rgba(109, 151, 218, 0.045);
+  border: 1px solid rgba(109, 151, 218, 0.15);
+  border-radius: 8px;
+}
+
+.interpretation-editor > strong {
+  font-size: 10px;
+}
+
+.interpretation-editor > p {
+  margin: -5px 0 0;
+  color: var(--faint);
+  font-size: 8px;
+}
+
 .direction-card dl,
 .image-dialog-copy dl {
   display: grid;

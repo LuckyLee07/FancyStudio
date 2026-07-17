@@ -201,7 +201,7 @@ class SopStoreTests(unittest.TestCase):
             task["prompt"]["requirement"]["instruction_id"], published["id"]
         )
         compiled = task["prompt"]["compiled"]
-        self.assertEqual(compiled["template_version"], "demo-six-segment-v1")
+        self.assertEqual(compiled["template_version"], "demo-six-segment-v2")
         self.assertEqual(len(compiled["hash"]), 64)
         self.assertEqual(compiled["source_refs"]["style_version_id"], style_v2["id"])
         self.assertEqual(compiled["source_refs"]["instruction_version_id"], published["id"])
@@ -1129,7 +1129,7 @@ class SopStoreTests(unittest.TestCase):
         self.assertTrue(manifest_asset["source"]["style"]["version_id"])
         self.assertEqual(
             manifest_asset["source"]["prompt_template_version"],
-            "demo-six-segment-v1",
+            "demo-six-segment-v2",
         )
         self.assertEqual(len(manifest_asset["source"]["prompt_hash"]), 64)
         self.assertEqual(

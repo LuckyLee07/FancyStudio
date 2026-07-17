@@ -8,8 +8,8 @@ from typing import Any
 
 
 TEMPLATE_VERSIONS = {
-    "demo": "demo-six-segment-v1",
-    "openai": "openai-six-segment-v1",
+    "demo": "demo-six-segment-v2",
+    "openai": "openai-six-segment-v2",
 }
 
 RATIO_SPECS = {
@@ -61,6 +61,18 @@ def build_segments(payload: dict[str, Any]) -> dict[str, Any]:
         raise PromptCompileError("PROMPT_STYLE_MISSING", "Prompt 缺少已发布风格片段。")
     if not str(instruction_content.get("visual_goal") or "").strip():
         raise PromptCompileError("PROMPT_INSTRUCTION_MISSING", "Prompt 缺少全局视觉目标。")
+    for field in (
+        "visual_thesis",
+        "scene",
+        "composition",
+        "text_safe_area",
+        "interpretation_layers",
+    ):
+        if not direction_content.get(field):
+            raise PromptCompileError(
+                "PROMPT_DIRECTION_CONTRACT_MISSING",
+                f"已批准方向缺少生产字段 {field}。",
+            )
 
     segments: dict[str, Any] = {
         "content": {
@@ -92,18 +104,28 @@ def build_segments(payload: dict[str, Any]) -> dict[str, Any]:
             "id": direction.get("id"),
             "version": direction.get("version"),
             "type": direction.get("type"),
+            "schema_version": direction.get("schema_version"),
+            "generation_run_id": direction.get("generation_run_id"),
             "title": direction_content.get("title"),
+            "visual_thesis": direction_content.get("visual_thesis"),
             "subject": direction_content.get("subject"),
+            "subject_mode": direction_content.get("subject_mode"),
+            "scene": direction_content.get("scene"),
             "shot": direction_content.get("shot"),
+            "shot_scale": direction_content.get("shot_scale"),
+            "narrative_mode": direction_content.get("narrative_mode"),
             "foreground": direction_content.get("foreground"),
             "midground": direction_content.get("midground"),
             "background": direction_content.get("background"),
             "action": direction_content.get("action"),
+            "composition": direction_content.get("composition"),
             "lighting": direction_content.get("lighting"),
             "palette": direction_content.get("palette"),
             "whitespace": direction_content.get("whitespace"),
+            "text_safe_area": direction_content.get("text_safe_area"),
             "preserve": _clean_list(direction_content.get("preserve")),
             "avoid": _clean_list(direction_content.get("avoid")),
+            "interpretation_layers": direction_content.get("interpretation_layers"),
         },
         "style": {
             "id": style.get("id"),
@@ -154,6 +176,22 @@ def _render_text(segments: dict[str, Any], provider: str) -> str:
     style = segments["style"]
     output = segments["output"]
     instruction = segments["instruction"]
+    layers = direction.get("interpretation_layers") or {}
+    fact_claims = [
+        str(item.get("claim") or "").strip()
+        for item in layers.get("poem_facts", [])
+        if isinstance(item, dict) and str(item.get("claim") or "").strip()
+    ]
+    inference_claims = [
+        str(item.get("claim") or "").strip()
+        for item in layers.get("reasonable_inferences", [])
+        if isinstance(item, dict) and str(item.get("claim") or "").strip()
+    ]
+    creative_claims = [
+        str(item.get("claim") or "").strip()
+        for item in layers.get("creative_choices", [])
+        if isinstance(item, dict) and str(item.get("claim") or "").strip()
+    ]
     blocks = [
         (
             "[01 CONTENT / 诗词正文]\n"
@@ -173,10 +211,14 @@ def _render_text(segments: dict[str, Any], provider: str) -> str:
         (
             "[03 DIRECTION / 已批准画面方向]\n"
             f"类型：{direction.get('type') or '未指定'}；标题：{direction.get('title') or '未命名方向'}\n"
+            f"视觉命题：{direction.get('visual_thesis') or '未指定'}\n"
+            f"场景：{direction.get('scene') or '未指定'}；构图：{direction.get('composition') or '未指定'}\n"
             f"主体与景别：{direction.get('subject') or '未指定'}；{direction.get('shot') or '未指定'}\n"
             f"前中后景：{direction.get('foreground') or '—'} / {direction.get('midground') or '—'} / {direction.get('background') or '—'}\n"
             f"动作：{direction.get('action') or '静态诗意'}；光线：{direction.get('lighting') or '自然光'}\n"
             f"色彩：{direction.get('palette') or '遵循风格包'}；留白：{direction.get('whitespace') or '保留排版安全区'}\n"
+            f"文字安全区：{direction.get('text_safe_area') or '未指定'}\n"
+            f"诗文事实：{_join(fact_claims)}；合理演绎：{_join(inference_claims)}；创意表达：{_join(creative_claims)}\n"
             f"保持：{_join(direction.get('preserve'))}；方向禁用：{_join(direction.get('avoid'))}"
         ),
         (
@@ -248,6 +290,8 @@ def compile_generation_prompt(
             "instruction_version_id": segments["instruction"].get("id"),
             "requirement_id": segments["requirement"].get("id"),
             "direction_id": segments["direction"].get("id"),
+            "direction_schema_version": segments["direction"].get("schema_version"),
+            "direction_generation_run_id": segments["direction"].get("generation_run_id"),
             "style_version_id": segments["style"].get("version_id"),
         },
     }

@@ -102,6 +102,27 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("requirement-contract-line", script)
         self.assertIn("generation-error-note", styles)
 
+    def test_direction_contract_diversity_and_failures_are_visible(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn("direction_generation_failures", script)
+        self.assertIn("direction_schema", script)
+        self.assertIn("direction_generation_runs", script)
+        self.assertIn("direction-contract-line", script)
+        self.assertIn("direction-generation-error", styles)
+        for field in (
+            "visual_thesis",
+            "subject_mode",
+            "shot_scale",
+            "composition",
+            "text_safe_area",
+            "poem_facts",
+            "reasonable_inferences",
+            "creative_choices",
+        ):
+            self.assertIn(f'name="{field}"', html)
+
 
 if __name__ == "__main__":
     unittest.main()

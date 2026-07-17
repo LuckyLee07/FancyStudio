@@ -14,6 +14,8 @@ const state = {
     requirement_generation_failures: [],
     requirement_schema: null,
     directions: [],
+    direction_generation_failures: [],
+    direction_schema: null,
     instruction: null,
     instruction_versions: [],
     style_packs: [],
@@ -901,6 +903,8 @@ function renderRequirements() {
 
 function directionCard(direction) {
   const content = direction.content || {};
+  const layers = content.interpretation_layers || {};
+  const diversity = direction.validation?.diversity || {};
   const [typeName, typeMark] = directionTypeMeta[direction.type] || [
     direction.type,
     "策",
@@ -914,13 +918,18 @@ function directionCard(direction) {
         )}</h4></div>
         ${statusBadge(direction.status, requirementStatusMeta)}
       </header>
+      <p class="direction-thesis">${escapeHtml(content.visual_thesis || content.subject || "")}</p>
       <p class="direction-subject">${escapeHtml(content.subject || "")}</p>
+      <div class="direction-signature"><span>${escapeHtml(content.subject_mode || "—")}</span><span>${escapeHtml(content.shot_scale || "—")}</span><span>${escapeHtml(content.narrative_mode || "—")}</span></div>
       <dl>
         <div><dt>景别</dt><dd>${escapeHtml(content.shot || "—")}</dd></div>
         <div><dt>主体层</dt><dd>${escapeHtml(content.midground || "—")}</dd></div>
         <div><dt>光线</dt><dd>${escapeHtml(content.lighting || "—")}</dd></div>
         <div><dt>留白</dt><dd>${escapeHtml(content.whitespace || "—")}</dd></div>
+        <div><dt>安全区</dt><dd>${escapeHtml(content.text_safe_area || "—")}</dd></div>
       </dl>
+      <div class="interpretation-summary"><span>事实 <strong>${(layers.poem_facts || []).length}</strong></span><span>演绎 <strong>${(layers.reasonable_inferences || []).length}</strong></span><span>创意 <strong>${(layers.creative_choices || []).length}</strong></span></div>
+      <p class="direction-contract-line">${escapeHtml(direction.schema_version || state.sop.direction_schema?.schema_version || "legacy")} · 差异轴下限 ${diversity.minimum_axis_differences ?? "—"}/3 · ${direction.cache_hit ? "缓存复验" : "本次策划"}</p>
       <div class="direction-preserve">
         <span>保持项</span>
         ${(content.preserve || [])
@@ -958,9 +967,19 @@ function directionCard(direction) {
     </article>`;
 }
 
+function directionFailureForPoem(poemId) {
+  return (state.sop.direction_generation_failures || []).find(
+    (item) => item.poem_id === poemId,
+  );
+}
+
 function renderDirections() {
+  const failedPoemIds = new Set(
+    (state.sop.direction_generation_failures || []).map((item) => item.poem_id),
+  );
   const poems = state.sop.poems.filter(
     (poem) =>
+      failedPoemIds.has(poem.id) ||
       poem.direction_count > 0 ||
       ["direction_draft", "direction_review", "ready_for_production"].includes(
         poem.status,
@@ -968,6 +987,8 @@ function renderDirections() {
   );
   const groups = poems.map((poem) => {
     const directions = directionsForPoem(poem.id);
+    const failure = directionFailureForPoem(poem.id);
+    const firstIssue = failure?.validation?.final_issues?.[0];
     return `
       <section class="direction-group">
         <header class="direction-group-head">
@@ -985,11 +1006,16 @@ function renderDirections() {
           </div>
         </header>
         ${
+          failure
+            ? `<div class="direction-generation-error"><div><strong>${escapeHtml(failure.error_code || "DIRECTION_SET_INVALID")}</strong><p>${escapeHtml(firstIssue?.message || failure.error_message || "三方向未通过生产门禁。")}</p><small>${escapeHtml(failure.schema_version)} · 自动修复 ${failure.repair_attempts || 0}/1 次 · ${formatDate(failure.completed_at)}</small></div><button class="danger-button" type="button" data-role-allow="art_director,producer,system_admin" data-poem-action="generate-direction" data-poem-id="${poem.id}">修正后重试</button></div>`
+            : ""
+        }
+        ${
           directions.length
             ? `<div class="direction-row">${directions
                 .map(directionCard)
                 .join("")}</div>`
-            : '<div class="direction-missing">需求已通过，等待生成叙事、意境、象征三个画面方向。</div>'
+            : `<div class="direction-missing">${failure ? "当前没有写入半套方向；修正异常后重新原子生成三方向。" : "需求已通过，等待生成叙事、意境、象征三个画面方向。"}</div>`
         }
       </section>`;
   });
@@ -1653,6 +1679,8 @@ async function openPoemDetail(poemId) {
     const latestRequirement = detail.requirements.find((item) => item.is_current);
     const requirementRuns = detail.requirement_generation_runs || [];
     const latestRequirementRun = requirementRuns[0];
+    const directionRuns = detail.direction_generation_runs || [];
+    const latestDirectionRun = directionRuns[0];
     const currentDirections = detail.directions.filter((item) => item.is_current);
     const currentAsset = detail.final_assets.find((item) => item.is_current);
     content.innerHTML = `
@@ -1666,6 +1694,7 @@ async function openPoemDetail(poemId) {
           ["需求版本", counts.requirements || 0],
           ["需求运行", counts.requirement_generation_runs || 0],
           ["方向版本", counts.directions || 0],
+          ["方向运行", counts.direction_generation_runs || 0],
           ["生成任务", counts.tasks || 0],
           ["候选图片", counts.images || 0],
           ["返工单", counts.reworks || 0],
@@ -1688,6 +1717,8 @@ async function openPoemDetail(poemId) {
           <header><span>S2</span><div><strong>画面方向</strong><small>当前版本 ${currentDirections.length} 个</small></div></header>
           <div class="poem-status-summary">${statusSummary(currentDirections) || '<span class="muted-value">尚无方向</span>'}</div>
           <p>${currentDirections.map((item) => `${directionTypeMeta[item.type]?.[0] || item.type} v${item.version}`).join(" · ") || "等待需求批准"}</p>
+          <p>${latestDirectionRun ? `${escapeHtml(latestDirectionRun.schema_version)} · ${escapeHtml(latestDirectionRun.status)} · 差异轴下限 ${latestDirectionRun.validation?.diversity?.minimum_axis_differences ?? "—"}/3` : "尚无方向生成运行记录"}</p>
+          ${latestDirectionRun?.error_code ? `<small class="error-code">${escapeHtml(latestDirectionRun.error_code)} · ${escapeHtml(latestDirectionRun.error_message)}</small>` : ""}
         </article>
         <article>
           <header><span>S3</span><div><strong>任务与候选</strong><small>批次执行结果</small></div></header>
@@ -2205,15 +2236,22 @@ function openDirectionEditor(directionId) {
   form.elements.direction_id.value = direction.id;
   [
     "title",
+    "visual_thesis",
     "subject",
+    "subject_mode",
+    "scene",
     "shot",
+    "shot_scale",
+    "narrative_mode",
     "foreground",
     "midground",
     "background",
     "action",
+    "composition",
     "lighting",
     "palette",
     "whitespace",
+    "text_safe_area",
     "risk_note",
     "art_director_note",
   ].forEach((key) => {
@@ -2222,10 +2260,32 @@ function openDirectionEditor(directionId) {
   ["preserve", "avoid", "locked_fields"].forEach((key) => {
     form.elements[key].value = (content[key] || []).join("\n");
   });
+  const layers = content.interpretation_layers || {};
+  form.elements.poem_facts.value = formatLayerLines(layers.poem_facts, "evidence_quote");
+  form.elements.reasonable_inferences.value = formatLayerLines(
+    layers.reasonable_inferences,
+    "basis",
+  );
+  form.elements.creative_choices.value = formatLayerLines(layers.creative_choices, "purpose");
   document.querySelector("#direction-dialog-title").textContent = `${direction.poem_title} · ${
     directionTypeMeta[direction.type]?.[0] || direction.type
   } v${direction.version}`;
   document.querySelector("#direction-dialog").showModal();
+}
+
+function formatLayerLines(items, secondKey) {
+  return (items || [])
+    .map((item) => `${item.claim || ""} | ${item[secondKey] || ""}`)
+    .join("\n");
+}
+
+function parseLayerLines(value, secondKey) {
+  return asLines(value).map((line) => {
+    const separator = line.indexOf("|");
+    const claim = (separator >= 0 ? line.slice(0, separator) : line).trim();
+    const detail = (separator >= 0 ? line.slice(separator + 1) : "").trim();
+    return { claim, [secondKey]: detail };
+  });
 }
 
 async function saveDirectionRevision(event) {
@@ -2240,18 +2300,33 @@ async function saveDirectionRevision(event) {
       body: JSON.stringify({
         content: {
           title: data.get("title"),
+          visual_thesis: data.get("visual_thesis"),
           subject: data.get("subject"),
+          subject_mode: data.get("subject_mode"),
+          scene: data.get("scene"),
           shot: data.get("shot"),
+          shot_scale: data.get("shot_scale"),
+          narrative_mode: data.get("narrative_mode"),
           foreground: data.get("foreground"),
           midground: data.get("midground"),
           background: data.get("background"),
           action: data.get("action"),
+          composition: data.get("composition"),
           lighting: data.get("lighting"),
           palette: data.get("palette"),
           whitespace: data.get("whitespace"),
+          text_safe_area: data.get("text_safe_area"),
           preserve: asLines(data.get("preserve")),
           avoid: asLines(data.get("avoid")),
           risk_note: data.get("risk_note"),
+          interpretation_layers: {
+            poem_facts: parseLayerLines(data.get("poem_facts"), "evidence_quote"),
+            reasonable_inferences: parseLayerLines(
+              data.get("reasonable_inferences"),
+              "basis",
+            ),
+            creative_choices: parseLayerLines(data.get("creative_choices"), "purpose"),
+          },
           art_director_note: data.get("art_director_note"),
           locked_fields: asLines(data.get("locked_fields")),
         },

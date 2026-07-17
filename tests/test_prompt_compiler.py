@@ -49,19 +49,39 @@ class PromptCompilerTests(unittest.TestCase):
                 "id": "dir_jing_narrative_v1",
                 "version": 1,
                 "type": "narrative",
+                "schema_version": "direction-proposal/v1",
+                "generation_run_id": "dirrun_jing_v1",
                 "content": {
                     "title": "客舍月夜",
+                    "visual_thesis": "以人物低头动作承载思乡，让月光与室内空间补充叙事",
                     "subject": "独坐旅人",
+                    "subject_mode": "human_focus",
+                    "scene": "唐代夜晚旅舍室内",
                     "shot": "中远景",
+                    "shot_scale": "medium",
+                    "narrative_mode": "narrative",
                     "foreground": "床沿与衣褶",
                     "midground": "低头人物",
                     "background": "纸窗月光",
                     "action": "由抬头转为低头",
+                    "composition": "人物位于中部三分线，窗月形成视线对照",
                     "lighting": "冷月光",
                     "palette": "月白与黛青",
                     "whitespace": "右上留白",
+                    "text_safe_area": "右上低细节留白区",
                     "preserve": ["孤独尺度"],
                     "avoid": ["戏剧化哭泣"],
+                    "interpretation_layers": {
+                        "poem_facts": [
+                            {"claim": "月光是诗中明确意象", "evidence_quote": "床前明月光"}
+                        ],
+                        "reasonable_inferences": [
+                            {"claim": "场景按旅舍室内处理", "basis": "由床前与羁旅主题推导"}
+                        ],
+                        "creative_choices": [
+                            {"claim": "人物置于三分线", "purpose": "形成窗月与人物对照"}
+                        ],
+                    },
                 },
             },
             "style": {
@@ -80,10 +100,10 @@ class PromptCompilerTests(unittest.TestCase):
         first = compile_generation_prompt(self.payload(), "openai")
         second = compile_generation_prompt(self.payload(), "openai")
         self.assertEqual(first, second)
-        self.assertEqual(first["template_version"], "openai-six-segment-v1")
+        self.assertEqual(first["template_version"], "openai-six-segment-v2")
         self.assertEqual(
             first["hash"],
-            "f37bdfe9c762595671e9aa800d735f76ee0fa6b9d11af913366a8873a883691f",
+            "10a8decc6c4246b4be92f81d059f1d16b019fdd75b36e9d59735b4152a279045",
         )
         for heading in (
             "[01 CONTENT / 诗词正文]",
@@ -97,6 +117,10 @@ class PromptCompilerTests(unittest.TestCase):
         self.assertEqual(
             first["source_refs"]["style_version_id"],
             "stylev_ink-whitespace_v1",
+        )
+        self.assertEqual(
+            first["source_refs"]["direction_schema_version"],
+            "direction-proposal/v1",
         )
 
     def test_provider_direction_and_rework_change_hash_without_losing_lineage(self):

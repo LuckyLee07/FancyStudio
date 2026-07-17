@@ -37,6 +37,10 @@
 - 需求生成运行记录保留原始输出、规范化输出、校验明细与错误码；单诗失败不拖垮整批，并进入总览异常、需求板和单诗详情；
 - 需求卡版本修订、字段锁定、未锁字段重算、批量批准和带原因退回；
 - 每首诗生成叙事型、意境型、象征型三个差异方向；
+- DirectionProposal v1 JSON Schema：视觉命题、场景、构图、文字安全区和事实分层均为生产必填字段；
+- 三方向以原子集合生成和校验，任意两方向在主体、景别、视觉叙事三轴中至少两项不同，失败时不写入半套结果；
+- 诗文事实、合理演绎与创意表达分层保存；事实引用必须能在当前 ContentVersion 中定位；
+- 方向生成按 Requirement、Schema 和生成器版本缓存，保留原始输出、一次修复、差异报告、错误码与恢复记录；
 - 方向审批门禁：至少一个方向通过后才进入“待排产”；
 - 方向版本化编辑、复制、停用与生产后硬锁，历史批次不受新版本影响；
 - 方向重生成默认保留锁定字段；一旦已有生产任务，服务端阻止重写方向并要求从候选图走返工链路；
@@ -124,8 +128,10 @@ FancyStudio/
 ├─ sop_store.py               SQLite 生产领域、门禁、队列、预算与审计
 ├─ prompt_compiler.py         六段式 Prompt 编译、Provider 模板、来源版本与哈希
 ├─ requirement_schema.py      RequirementCard v1 校验、一次修复与置信度规则
+├─ direction_schema.py        DirectionProposal v1、事实分层与三方向差异门禁
 ├─ schemas/
-│  └─ requirement-card.schema.json  需求卡 JSON Schema
+│  ├─ requirement-card.schema.json  需求卡 JSON Schema
+│  └─ direction-proposal.schema.json 画面方向 JSON Schema
 ├─ qc_engine.py               离线技术质检、格式解析与相似指纹
 ├─ backup_service.py          数据库与资产备份、校验和安全恢复
 ├─ backup_tool.py             离线备份 / 列表 / 校验 / 恢复命令
@@ -147,6 +153,7 @@ FancyStudio/
    ├─ test_performance.py     300 首分页与 1000 任务批次性能门禁
    ├─ test_prompt_compiler.py 确定性编译、来源版本与快照哈希
    ├─ test_requirement_schema.py Schema、修复、缓存、隔离失败与恢复
+   ├─ test_direction_schema.py 三方向合同、差异门禁、原子写入与恢复
    ├─ test_frontend_contract.py 页面与脚本契约
    └─ test_server.py          HTTP API、生成、编辑、评审与完整流程
 ```
@@ -183,6 +190,7 @@ python3 -m unittest discover -s tests -v
 - RequirementCard Schema、一次修复、缓存命中、批量部分失败、异常下钻和恢复；
 - 需求批量决策、锁字段重算和旧方向失效；
 - 三方向生成与审批门禁；
+- DirectionProposal Schema、事实分层、三方向两两差异、缓存、原子失败和恢复；
 - 方向修订、复制、停用、字段锁和生产冻结；
 - 批次预估、持久任务、Attempt、预算硬停和暂停 / 恢复；
 - 服务中断后的结果未知保护与显式确认重试；

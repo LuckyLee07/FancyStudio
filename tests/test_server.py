@@ -147,6 +147,57 @@ class TangPoemStudioTests(unittest.TestCase):
         _, backups = self.request_json("/api/backups")
         self.assertEqual(backups["items"][0]["name"], backup_name)
 
+    def test_direction_schema_diversity_and_run_trace_endpoints(self):
+        status, schema = self.request_json("/api/schemas/direction-proposal")
+        self.assertEqual(status, 200)
+        self.assertEqual(schema["title"], "DirectionProposal v1")
+        self.assertIn("interpretation_layers", schema["required"])
+
+        store = server.get_sop_store()
+        editor = {"id": "editor-direction-api", "role": "content_editor"}
+        art = {"id": "art-direction-api", "role": "art_director"}
+        requirement = store.generate_requirements(
+            server.SOP_DEFAULT_PROJECT_ID,
+            ["jing-ye-si"],
+            actor=editor,
+        )["results"][0]
+        store.decide_requirement(requirement["requirement_id"], "approve", actor=editor)
+
+        status, generated = self.request_json(
+            "/api/directions/generate",
+            method="POST",
+            payload={
+                "project_id": server.SOP_DEFAULT_PROJECT_ID,
+                "poem_ids": ["jing-ye-si"],
+                "actor": art,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(generated["succeeded"], 1)
+        result = generated["results"][0]
+        self.assertEqual(len(result["direction_ids"]), 3)
+        self.assertGreaterEqual(result["diversity"]["minimum_axis_differences"], 2)
+
+        status, runs = self.request_json(
+            "/api/direction-generation-runs?poem_id=jing-ye-si&status=succeeded"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(runs["items"]), 1)
+        self.assertEqual(runs["items"][0]["schema_version"], "direction-proposal/v1")
+        self.assertTrue(runs["items"][0]["validation"]["diversity"]["valid"])
+
+        status, detail = self.request_json("/api/poems/jing-ye-si")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["counts"]["direction_generation_runs"], 1)
+
+        status, bootstrap = self.request_json("/api/sop/bootstrap")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            bootstrap["direction_schema"]["schema_version"],
+            "direction-proposal/v1",
+        )
+        self.assertEqual(bootstrap["direction_generation_failures"], [])
+
     def test_request_ids_structured_logs_atomic_writes_and_path_safety(self):
         request = urllib.request.Request(
             self.base_url + "/api/reports/production?days=invalid",
@@ -621,7 +672,7 @@ class TangPoemStudioTests(unittest.TestCase):
             item for item in candidates if item["status"] == "review_ready"
         )
         self.assertIn(candidate["qc"]["status"], {"pass", "soft_risk"})
-        self.assertEqual(candidate["prompt_template_version"], "demo-six-segment-v1")
+        self.assertEqual(candidate["prompt_template_version"], "demo-six-segment-v2")
         self.assertEqual(len(candidate["prompt_hash"]), 64)
         self.assertIn("instruction", candidate["prompt_segments"])
         self.assertIn("style", candidate["prompt_segments"])
@@ -739,7 +790,7 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertEqual(manifest["assets"][0]["source"]["style"]["version"], 1)
         self.assertEqual(
             manifest["assets"][0]["source"]["prompt_template_version"],
-            "demo-six-segment-v1",
+            "demo-six-segment-v2",
         )
         self.assertEqual(
             len(manifest["assets"][0]["source"]["prompt_hash"]),

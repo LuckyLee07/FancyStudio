@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fancystudio.local/schemas/direction-proposal-v1.json",
+  "title": "DirectionProposal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type", "title", "visual_thesis", "subject", "subject_mode", "scene",
+    "shot", "shot_scale", "narrative_mode", "foreground", "midground",
+    "background", "action", "composition", "lighting", "palette",
+    "whitespace", "preserve", "avoid", "text_safe_area", "risk_note",
+    "interpretation_layers", "art_director_note", "locked_fields"
+  ],
+  "properties": {
+    "type": {"enum": ["narrative", "atmospheric", "symbolic"]},
+    "title": {"$ref": "#/$defs/text"},
+    "visual_thesis": {"$ref": "#/$defs/text"},
+    "subject": {"$ref": "#/$defs/text"},
+    "subject_mode": {"enum": ["human_focus", "environment_focus", "object_focus"]},
+    "scene": {"$ref": "#/$defs/text"},
+    "shot": {"$ref": "#/$defs/text"},
+    "shot_scale": {"enum": ["wide", "medium", "close"]},
+    "narrative_mode": {"enum": ["narrative", "atmosphere", "symbolism"]},
+    "foreground": {"$ref": "#/$defs/text"},
+    "midground": {"$ref": "#/$defs/text"},
+    "background": {"$ref": "#/$defs/text"},
+    "action": {"$ref": "#/$defs/text"},
+    "composition": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "lighting": {"$ref": "#/$defs/text"},
+    "palette": {"$ref": "#/$defs/text"},
+    "whitespace": {"$ref": "#/$defs/text"},
+    "preserve": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "avoid": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "text_safe_area": {"$ref": "#/$defs/text"},
+    "risk_note": {"$ref": "#/$defs/text"},
+    "interpretation_layers": {"$ref": "#/$defs/interpretationLayers"},
+    "art_director_note": {"type": "string", "maxLength": 2000},
+    "locked_fields": {
+      "type": "array",
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "title", "visual_thesis", "subject", "subject_mode", "scene",
+          "shot", "shot_scale", "narrative_mode", "foreground", "midground",
+          "background", "action", "composition", "lighting", "palette",
+          "whitespace", "preserve", "avoid", "text_safe_area", "risk_note",
+          "interpretation_layers", "art_director_note"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "nonEmptyStringArray": {
+      "type": "array", "minItems": 1, "maxItems": 30, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "fact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim", "evidence_quote"],
+      "properties": {"claim": {"$ref": "#/$defs/text"}, "evidence_quote": {"$ref": "#/$defs/text"}}
+    },
+    "inference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim", "basis"],
+      "properties": {"claim": {"$ref": "#/$defs/text"}, "basis": {"$ref": "#/$defs/text"}}
+    },
+    "creative": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim", "purpose"],
+      "properties": {"claim": {"$ref": "#/$defs/text"}, "purpose": {"$ref": "#/$defs/text"}}
+    },
+    "interpretationLayers": {
+      "type": "object", "additionalProperties": false,
+      "required": ["poem_facts", "reasonable_inferences", "creative_choices"],
+      "properties": {
+        "poem_facts": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/fact"}},
+        "reasonable_inferences": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/inference"}},
+        "creative_choices": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/$defs/creative"}}
+      }
+    }
+  }
+}

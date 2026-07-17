@@ -20,6 +20,13 @@ from typing import Any, Iterable
 
 from qc_engine import EXPECTED_RATIOS, hamming_distance
 from prompt_compiler import PromptCompileError, compile_generation_prompt
+from direction_schema import (
+    GENERATOR_VERSION as DIRECTION_GENERATOR_VERSION,
+    SCHEMA_VERSION as DIRECTION_SCHEMA_VERSION,
+    validate_direction_proposal,
+    validate_direction_set,
+    validate_with_single_repair as validate_direction_set_with_single_repair,
+)
 from requirement_schema import (
     GENERATOR_VERSION as REQUIREMENT_GENERATOR_VERSION,
     SCHEMA_VERSION as REQUIREMENT_SCHEMA_VERSION,
@@ -110,18 +117,26 @@ REQUIREMENT_FIELDS = {
 DIRECTION_FIELDS = {
     "title",
     "type",
+    "visual_thesis",
     "subject",
+    "subject_mode",
+    "scene",
     "shot",
+    "shot_scale",
+    "narrative_mode",
     "foreground",
     "midground",
     "background",
     "action",
+    "composition",
     "lighting",
     "palette",
     "whitespace",
     "preserve",
     "avoid",
+    "text_safe_area",
     "risk_note",
+    "interpretation_layers",
     "art_director_note",
     "locked_fields",
 }
@@ -792,6 +807,68 @@ class SopStore:
                     COMMIT;
                     """
                 )
+            if 9 not in applied:
+                connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+
+                    ALTER TABLE directions
+                    ADD COLUMN schema_version TEXT NOT NULL DEFAULT 'legacy';
+
+                    ALTER TABLE directions
+                    ADD COLUMN generator_version TEXT NOT NULL DEFAULT 'legacy';
+
+                    ALTER TABLE directions
+                    ADD COLUMN input_hash TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE directions
+                    ADD COLUMN cache_hit INTEGER NOT NULL DEFAULT 0;
+
+                    ALTER TABLE directions
+                    ADD COLUMN validation_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE directions
+                    ADD COLUMN generation_run_id TEXT NOT NULL DEFAULT '';
+
+                    CREATE TABLE direction_generation_runs (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        poem_id TEXT NOT NULL REFERENCES poems(id),
+                        requirement_id TEXT NOT NULL DEFAULT '',
+                        schema_version TEXT NOT NULL,
+                        generator_version TEXT NOT NULL,
+                        input_hash TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        cache_hit INTEGER NOT NULL DEFAULT 0,
+                        repair_attempts INTEGER NOT NULL DEFAULT 0,
+                        raw_output_json TEXT,
+                        normalized_output_json TEXT,
+                        validation_json TEXT NOT NULL DEFAULT '{}',
+                        error_code TEXT NOT NULL DEFAULT '',
+                        error_message TEXT NOT NULL DEFAULT '',
+                        direction_ids_json TEXT NOT NULL DEFAULT '[]',
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT NOT NULL,
+                        resolved_at TEXT
+                    );
+
+                    CREATE INDEX idx_direction_runs_project_status
+                    ON direction_generation_runs(project_id, status, created_at);
+
+                    CREATE INDEX idx_direction_runs_poem_created
+                    ON direction_generation_runs(poem_id, created_at);
+
+                    CREATE INDEX idx_direction_runs_cache
+                    ON direction_generation_runs(input_hash, schema_version,
+                                                 generator_version, status);
+
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (9, CURRENT_TIMESTAMP);
+
+                    COMMIT;
+                    """
+                )
 
     def _recover_interrupted_work(self) -> None:
         """Make crash recovery explicit without automatically repeating billed work."""
@@ -1154,6 +1231,22 @@ class SopStore:
     def _direction_dict(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["content"] = _decode(item.pop("content_json", None), {})
+        if "validation_json" in item:
+            item["validation"] = _decode(item.pop("validation_json", None), {})
+        if "cache_hit" in item:
+            item["cache_hit"] = bool(item["cache_hit"])
+        return item
+
+    @staticmethod
+    def _direction_run_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["raw_output"] = _decode(item.pop("raw_output_json", None), None)
+        item["normalized_output"] = _decode(
+            item.pop("normalized_output_json", None), None
+        )
+        item["validation"] = _decode(item.pop("validation_json", None), {})
+        item["direction_ids"] = _decode(item.pop("direction_ids_json", None), [])
+        item["cache_hit"] = bool(item.get("cache_hit"))
         return item
 
     @staticmethod
@@ -1465,10 +1558,12 @@ class SopStore:
                       (SELECT COUNT(*) FROM generation_batches WHERE project_id=? AND status='budget_blocked') AS budget_blocked,
                       (SELECT COUNT(*) FROM export_packages WHERE project_id=? AND status='failed') AS failed_exports,
                       (SELECT COUNT(*) FROM requirement_generation_runs WHERE project_id=? AND status='failed' AND resolved_at IS NULL) AS failed_requirement_runs,
+                      (SELECT COUNT(*) FROM direction_generation_runs WHERE project_id=? AND status='failed' AND resolved_at IS NULL) AS failed_direction_runs,
                       (SELECT COUNT(*) FROM poems WHERE project_id=? AND status='blocked') AS blocked_poems,
                       (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND t.status='running' AND t.updated_at < ?) AS stale_tasks
                     """,
                     (
+                        project_id,
                         project_id,
                         project_id,
                         project_id,
@@ -1515,6 +1610,7 @@ class SopStore:
             ("budget_blocked", "预算阻塞批次", "high", "resources", "budget_blocked", "调整预算或取消批次"),
             ("failed_exports", "失败导出包", "high", "assets", "failed", "修复文件后重新导出"),
             ("failed_requirement_runs", "需求生成异常", "high", "requirements", "failed", "查看 Schema 错误并重试该诗需求"),
+            ("failed_direction_runs", "方向生成异常", "high", "directions", "failed", "查看三方向 Schema 或差异错误并重试"),
             ("blocked_poems", "阻塞诗词", "medium", "overview", "blocked", "查看阻塞原因并指定责任人"),
         )
         anomalies = [
@@ -2121,6 +2217,120 @@ class SopStore:
             ).fetchall()
         return [self._direction_dict(row) for row in rows]
 
+    def direction_generation_runs(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        *,
+        poem_id: str | None = None,
+        status: str | None = None,
+        unresolved_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if status and status not in {"succeeded", "failed"}:
+            raise WorkflowError(
+                "INVALID_DIRECTION_RUN_STATUS",
+                "不支持的方向生成运行状态。",
+            )
+        where = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        if poem_id:
+            where.append("poem_id = ?")
+            params.append(str(poem_id)[:80])
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if unresolved_only:
+            where.append("resolved_at IS NULL")
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM direction_generation_runs
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                [*params, max(1, min(int(limit), 500))],
+            ).fetchall()
+        return [self._direction_run_dict(row) for row in rows]
+
+    @staticmethod
+    def _direction_input_hash(
+        requirement: sqlite3.Row | dict[str, Any],
+    ) -> str:
+        item = dict(requirement)
+        payload = {
+            "schema_version": DIRECTION_SCHEMA_VERSION,
+            "generator_version": DIRECTION_GENERATOR_VERSION,
+            "requirement": {
+                "id": item.get("id"),
+                "version": item.get("version"),
+                "content_version_id": item.get("content_version_id"),
+                "instruction_id": item.get("instruction_id"),
+                "content": _decode(item.get("content_json"), item.get("content", {})),
+            },
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _record_direction_run_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        project_id: str,
+        poem_id: str,
+        requirement_id: str,
+        input_hash: str,
+        status: str,
+        cache_hit: bool,
+        repair_attempts: int,
+        raw_output: Any,
+        normalized_output: Any,
+        validation: dict[str, Any],
+        error_code: str,
+        error_message: str,
+        direction_ids: list[str],
+        actor_id: str,
+        now: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO direction_generation_runs(
+                id, project_id, poem_id, requirement_id, schema_version,
+                generator_version, input_hash, status, cache_hit,
+                repair_attempts, raw_output_json, normalized_output_json,
+                validation_json, error_code, error_message, direction_ids_json,
+                created_by, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                project_id,
+                poem_id,
+                requirement_id,
+                DIRECTION_SCHEMA_VERSION,
+                DIRECTION_GENERATOR_VERSION,
+                input_hash,
+                status,
+                int(cache_hit),
+                max(0, min(int(repair_attempts), 1)),
+                _json(raw_output) if raw_output is not None else None,
+                _json(normalized_output) if normalized_output is not None else None,
+                _json(validation),
+                str(error_code)[:100],
+                str(error_message)[:1000],
+                _json(direction_ids),
+                actor_id,
+                now,
+                now,
+            ),
+        )
+
     def poem_detail(self, poem_id: str) -> dict[str, Any]:
         poem_id = str(poem_id).strip()[:80]
         with self._connect() as connection:
@@ -2155,6 +2365,13 @@ class SopStore:
                 """
                 SELECT * FROM directions
                 WHERE poem_id = ? ORDER BY type, version DESC
+                """,
+                (poem_id,),
+            ).fetchall()
+            direction_run_rows = connection.execute(
+                """
+                SELECT * FROM direction_generation_runs
+                WHERE poem_id = ? ORDER BY created_at DESC LIMIT 200
                 """,
                 (poem_id,),
             ).fetchall()
@@ -2226,6 +2443,7 @@ class SopStore:
             linked_ids.extend(row["id"] for row in requirement_rows)
             linked_ids.extend(row["id"] for row in requirement_run_rows)
             linked_ids.extend(row["id"] for row in direction_rows)
+            linked_ids.extend(row["id"] for row in direction_run_rows)
             linked_ids.extend(row["id"] for row in task_rows)
             linked_ids.extend(image_ids)
             linked_ids.extend(row["id"] for row in rework_rows)
@@ -2251,6 +2469,7 @@ class SopStore:
             self._requirement_run_dict(row) for row in requirement_run_rows
         ]
         directions = [self._direction_dict(row) for row in direction_rows]
+        direction_runs = [self._direction_run_dict(row) for row in direction_run_rows]
         tasks = [self._task_dict(row) for row in task_rows]
         reworks = [self._production_image_dict(row) for row in rework_rows]
         final_assets = []
@@ -2271,6 +2490,7 @@ class SopStore:
             "requirements": requirements,
             "requirement_generation_runs": requirement_runs,
             "directions": directions,
+            "direction_generation_runs": direction_runs,
             "tasks": tasks,
             "images": images,
             "rework_orders": reworks,
@@ -2282,6 +2502,7 @@ class SopStore:
                 "requirements": len(requirements),
                 "requirement_generation_runs": len(requirement_runs),
                 "directions": len(directions),
+                "direction_generation_runs": len(direction_runs),
                 "tasks": len(tasks),
                 "images": len(images),
                 "reworks": len(reworks),
@@ -2905,6 +3126,9 @@ class SopStore:
             SELECT d.id AS direction_id, d.poem_id, d.requirement_id,
                    d.version AS direction_version, d.type AS direction_type,
                    d.content_json AS direction_content_json,
+                   d.schema_version AS direction_schema_version,
+                   d.generation_run_id AS direction_generation_run_id,
+                   d.validation_json AS direction_validation_json,
                    p.title AS poem_title, p.author, p.dynasty,
                    p.lines_json, p.theme, p.mood, p.status AS poem_status,
                    cv.id AS content_version_id,
@@ -2929,6 +3153,18 @@ class SopStore:
             """,
             params,
         ).fetchall()
+        invalid_contracts = [
+            row["direction_id"]
+            for row in rows
+            if row["direction_schema_version"] != DIRECTION_SCHEMA_VERSION
+            or _decode(row["direction_validation_json"], {}).get("valid") is not True
+        ]
+        if invalid_contracts:
+            raise WorkflowError(
+                "DIRECTION_SCHEMA_REVIEW_REQUIRED",
+                "所选方向包含未通过当前 DirectionProposal Schema 的版本，请重新生成或修订。",
+                status=409,
+            )
         covered = {row["poem_id"] for row in rows}
         missing = [poem_id for poem_id in poem_ids if poem_id not in covered]
         if missing:
@@ -3166,6 +3402,8 @@ class SopStore:
                                 "id": row["direction_id"],
                                 "version": row["direction_version"],
                                 "type": row["direction_type"],
+                                "schema_version": row["direction_schema_version"],
+                                "generation_run_id": row["direction_generation_run_id"],
                                 "content": direction_content,
                             },
                             "style_id": style_id,
@@ -5845,6 +6083,15 @@ class SopStore:
                 "generator_version": REQUIREMENT_GENERATOR_VERSION,
             },
             "directions": self.directions(project_id),
+            "direction_generation_failures": self.direction_generation_runs(
+                project_id,
+                status="failed",
+                unresolved_only=True,
+            ),
+            "direction_schema": {
+                "schema_version": DIRECTION_SCHEMA_VERSION,
+                "generator_version": DIRECTION_GENERATOR_VERSION,
+            },
             "instruction": self.instruction(project_id),
             "instruction_versions": self.instructions(project_id),
             "style_packs": self.style_pack_versions(project_id),
@@ -6755,6 +7002,7 @@ class SopStore:
         poem: sqlite3.Row,
         requirement: sqlite3.Row,
         direction_type: str,
+        source_text: str,
     ) -> dict[str, Any]:
         requirement_content = _decode(requirement["content_json"], {})
         imagery = requirement_content.get("core_imagery") or _decode(
@@ -6765,33 +7013,54 @@ class SopStore:
         templates = {
             "narrative": {
                 "title": f"{first} · 叙事场景",
+                "visual_thesis": "用人物的克制行动承载诗中事件，让环境补充而不抢夺叙事。",
                 "subject": "以诗中人物行动或事件为画面主线",
+                "subject_mode": "human_focus",
+                "scene": requirement_content.get("time_and_place") or "依据原诗确定的唐代场景",
                 "shot": "中远景，人物与环境关系清楚",
+                "shot_scale": "medium",
+                "narrative_mode": "narrative",
                 "foreground": f"以{second}建立空间入口",
                 "midground": "核心人物或叙事动作",
                 "background": "符合诗意时空的远景",
                 "action": "动作克制，避免舞台化表演",
+                "composition": "人物位于中部三分线，前景引导视线，远景交代时空与去向。",
                 "whitespace": "中等留白",
+                "text_safe_area": "画面左上保留连续低细节区域",
             },
             "atmospheric": {
                 "title": f"{first} · 意境留白",
+                "visual_thesis": "弱化人物存在，以光、气候和空间尺度把诗意转成环境体验。",
                 "subject": "自然意象为主体，人物弱化或不出现",
+                "subject_mode": "environment_focus",
+                "scene": requirement_content.get("time_and_place") or "依据原诗确定的自然环境",
                 "shot": "远景或大全景，强调空间与气候",
+                "shot_scale": "wide",
+                "narrative_mode": "atmosphere",
                 "foreground": "少量近景作为尺度",
                 "midground": f"突出{first}与{second}的关系",
                 "background": "大面积天空、水面或山势",
                 "action": "依靠光、雾、风或水面变化表达情绪",
+                "composition": "地景压低，天空或水面占据主要面积，以层叠空间形成深远留白。",
                 "whitespace": "高留白",
+                "text_safe_area": "画面右上保留大面积平静天空或雾面",
             },
             "symbolic": {
                 "title": f"{first} · 象征构成",
+                "visual_thesis": "放大一个核心物象，以空间对照表达情绪，明确它是创意表达而非历史事实。",
                 "subject": "提炼一个核心意象作为视觉焦点",
+                "subject_mode": "object_focus",
+                "scene": "由诗中意象提炼的克制象征空间",
                 "shot": "近中景结合，构图更凝练",
+                "shot_scale": "close",
+                "narrative_mode": "symbolism",
                 "foreground": "象征性纹理或局部器物",
                 "midground": f"放大{first}的视觉重量",
                 "background": "简化为色块与含蓄空间线索",
                 "action": "以物喻情，不把隐喻误作历史事实",
+                "composition": "核心物象偏离中心形成张力，背景压缩为少量层次与明确负空间。",
                 "whitespace": "中高留白",
+                "text_safe_area": "画面上方或侧方保留单一色调负空间",
             },
         }
         content = templates[direction_type]
@@ -6803,11 +7072,42 @@ class SopStore:
                 "preserve": list(requirement_content.get("must_have", []))[:4],
                 "avoid": list(requirement_content.get("avoid", []))[:8],
                 "risk_note": "涉及人物、服饰、器物和建筑时进入历史复核",
+                "interpretation_layers": {
+                    "poem_facts": [
+                        {
+                            "claim": f"画面保留诗中明确出现的核心意象：{first}",
+                            "evidence_quote": source_text,
+                        }
+                    ],
+                    "reasonable_inferences": [
+                        {
+                            "claim": f"画面情绪按“{requirement_content.get('mood') or poem['mood']}”处理",
+                            "basis": "由已批准 RequirementCard 的情绪与构图建议推导",
+                        }
+                    ],
+                    "creative_choices": [
+                        {
+                            "claim": content["composition"],
+                            "purpose": "形成可生产且与另外两个方向可区分的视觉结构",
+                        }
+                    ],
+                },
                 "art_director_note": "",
                 "locked_fields": [],
             }
         )
         return content
+
+    def _generate_direction_candidates(
+        self,
+        poem: sqlite3.Row,
+        requirement: sqlite3.Row,
+        source_text: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            self._direction_content(poem, requirement, direction_type, source_text)
+            for direction_type in DIRECTION_TYPES
+        ]
 
     def generate_directions(
         self,
@@ -6847,8 +7147,7 @@ class SopStore:
                         continue
                     requirement = connection.execute(
                         """
-                        SELECT *
-                        FROM requirements
+                        SELECT * FROM requirements
                         WHERE poem_id = ? AND is_current = 1
                           AND status = 'approved'
                         """,
@@ -6864,35 +7163,220 @@ class SopStore:
                             }
                         )
                         continue
+
                     now = utc_now()
-                    generated: list[str] = []
+                    run_id = _new_id("dirrun")
+                    input_hash = self._direction_input_hash(requirement)
+                    content_version = connection.execute(
+                        "SELECT * FROM content_versions WHERE id = ?",
+                        (requirement["content_version_id"],),
+                    ).fetchone()
+                    if not content_version:
+                        content_version = connection.execute(
+                            """
+                            SELECT * FROM content_versions
+                            WHERE poem_id = ? AND status = 'approved'
+                            ORDER BY version DESC LIMIT 1
+                            """,
+                            (poem_id,),
+                        ).fetchone()
+                    if not content_version:
+                        validation = {
+                            "schema_version": DIRECTION_SCHEMA_VERSION,
+                            "valid": False,
+                            "repair_attempts": 0,
+                            "initial_issues": [],
+                            "final_issues": [
+                                {
+                                    "path": "$.content_version",
+                                    "code": "APPROVED_CONTENT_REQUIRED",
+                                    "message": "方向生成前必须存在已批准 ContentVersion。",
+                                }
+                            ],
+                        }
+                        self._record_direction_run_locked(
+                            connection,
+                            run_id=run_id,
+                            project_id=project_id,
+                            poem_id=poem_id,
+                            requirement_id=requirement["id"],
+                            input_hash=input_hash,
+                            status="failed",
+                            cache_hit=False,
+                            repair_attempts=0,
+                            raw_output=None,
+                            normalized_output=None,
+                            validation=validation,
+                            error_code="APPROVED_CONTENT_REQUIRED",
+                            error_message="方向生成前必须存在已批准内容版本。",
+                            direction_ids=[],
+                            actor_id=actor_id,
+                            now=now,
+                        )
+                        connection.execute(
+                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
+                            ("方向生成缺少已批准内容版本。", now, poem_id),
+                        )
+                        self._audit(
+                            connection,
+                            actor=actor,
+                            action="direction.generation_failed",
+                            target_type="direction_generation_run",
+                            target_id=run_id,
+                            after={"poem_id": poem_id, "error_code": "APPROVED_CONTENT_REQUIRED"},
+                        )
+                        results.append(
+                            {
+                                "poem_id": poem_id,
+                                "ok": False,
+                                "run_id": run_id,
+                                "code": "APPROVED_CONTENT_REQUIRED",
+                                "message": "方向生成前必须存在已批准内容版本。",
+                            }
+                        )
+                        continue
+
+                    source_text = "，".join(_decode(content_version["lines_json"], []))
+                    cached = connection.execute(
+                        """
+                        SELECT * FROM direction_generation_runs
+                        WHERE input_hash = ? AND schema_version = ?
+                          AND generator_version = ? AND status = 'succeeded'
+                          AND normalized_output_json IS NOT NULL
+                        ORDER BY completed_at DESC LIMIT 1
+                        """,
+                        (
+                            input_hash,
+                            DIRECTION_SCHEMA_VERSION,
+                            DIRECTION_GENERATOR_VERSION,
+                        ),
+                    ).fetchone()
+                    cache_hit = bool(cached)
+                    if cached:
+                        raw_output = _decode(cached["normalized_output_json"], [])
+                    else:
+                        try:
+                            raw_output = self._generate_direction_candidates(
+                                poem,
+                                requirement,
+                                source_text,
+                            )
+                        except Exception as exc:  # planner/provider isolation per poem
+                            validation = {
+                                "schema_version": DIRECTION_SCHEMA_VERSION,
+                                "valid": False,
+                                "repair_attempts": 0,
+                                "initial_issues": [],
+                                "final_issues": [],
+                            }
+                            self._record_direction_run_locked(
+                                connection,
+                                run_id=run_id,
+                                project_id=project_id,
+                                poem_id=poem_id,
+                                requirement_id=requirement["id"],
+                                input_hash=input_hash,
+                                status="failed",
+                                cache_hit=False,
+                                repair_attempts=0,
+                                raw_output=None,
+                                normalized_output=None,
+                                validation=validation,
+                                error_code="DIRECTION_GENERATOR_FAILED",
+                                error_message=str(exc),
+                                direction_ids=[],
+                                actor_id=actor_id,
+                                now=now,
+                            )
+                            connection.execute(
+                                "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
+                                ("方向策划器调用失败，请在异常中心重试。", now, poem_id),
+                            )
+                            self._audit(
+                                connection,
+                                actor=actor,
+                                action="direction.generation_failed",
+                                target_type="direction_generation_run",
+                                target_id=run_id,
+                                after={"poem_id": poem_id, "error_code": "DIRECTION_GENERATOR_FAILED"},
+                            )
+                            results.append(
+                                {
+                                    "poem_id": poem_id,
+                                    "ok": False,
+                                    "run_id": run_id,
+                                    "code": "DIRECTION_GENERATOR_FAILED",
+                                    "message": "方向策划器调用失败。",
+                                }
+                            )
+                            continue
+
+                    normalized_output, validation = validate_direction_set_with_single_repair(
+                        raw_output,
+                        source_text=source_text,
+                    )
+                    if not validation["valid"]:
+                        issues = validation.get("final_issues", [])
+                        self._record_direction_run_locked(
+                            connection,
+                            run_id=run_id,
+                            project_id=project_id,
+                            poem_id=poem_id,
+                            requirement_id=requirement["id"],
+                            input_hash=input_hash,
+                            status="failed",
+                            cache_hit=cache_hit,
+                            repair_attempts=validation["repair_attempts"],
+                            raw_output=raw_output,
+                            normalized_output=normalized_output,
+                            validation=validation,
+                            error_code="DIRECTION_SET_INVALID",
+                            error_message=(issues[0]["message"] if issues else "方向集合校验失败。"),
+                            direction_ids=[],
+                            actor_id=actor_id,
+                            now=now,
+                        )
+                        connection.execute(
+                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
+                            ("三方向自动修复一次后仍未通过 Schema 或差异门禁。", now, poem_id),
+                        )
+                        self._audit(
+                            connection,
+                            actor=actor,
+                            action="direction.generation_failed",
+                            target_type="direction_generation_run",
+                            target_id=run_id,
+                            after={
+                                "poem_id": poem_id,
+                                "error_code": "DIRECTION_SET_INVALID",
+                                "issues": issues[:8],
+                            },
+                        )
+                        results.append(
+                            {
+                                "poem_id": poem_id,
+                                "ok": False,
+                                "run_id": run_id,
+                                "code": "DIRECTION_SET_INVALID",
+                                "message": "三方向自动修复一次后仍未通过 Schema 或差异门禁。",
+                                "issues": issues[:8],
+                            }
+                        )
+                        continue
+
+                    current_rows = connection.execute(
+                        "SELECT * FROM directions WHERE poem_id = ? AND is_current = 1",
+                        (poem_id,),
+                    ).fetchall()
+                    current_by_type = {row["type"]: row for row in current_rows}
+                    content_by_type = {
+                        item["type"]: _decode(_json(item), {})
+                        for item in normalized_output
+                    }
                     preserved_by_type: dict[str, list[str]] = {}
                     for direction_type in DIRECTION_TYPES:
-                        current = connection.execute(
-                            """
-                            SELECT *
-                            FROM directions
-                            WHERE poem_id = ? AND type = ? AND is_current = 1
-                            """,
-                            (poem_id, direction_type),
-                        ).fetchone()
-                        version = connection.execute(
-                            """
-                            SELECT COALESCE(MAX(version), 0) + 1 AS next_version
-                            FROM directions
-                            WHERE poem_id = ? AND type = ?
-                            """,
-                            (poem_id, direction_type),
-                        ).fetchone()["next_version"]
-                        if current:
-                            connection.execute(
-                                "UPDATE directions SET is_current = 0 WHERE id = ?",
-                                (current["id"],),
-                            )
-                        direction_id = _new_id("dir")
-                        content = self._direction_content(
-                            poem, requirement, direction_type
-                        )
+                        current = current_by_type.get(direction_type)
+                        content = content_by_type[direction_type]
                         preserved_fields: list[str] = []
                         if current and preserve_locked:
                             current_content = _decode(current["content_json"], {})
@@ -6900,6 +7384,7 @@ class SopStore:
                                 str(field)
                                 for field in current_content.get("locked_fields", [])
                                 if str(field) in DIRECTION_FIELDS
+                                and str(field) not in {"type", "locked_fields"}
                             ]
                             for field in locked_fields:
                                 if field in current_content:
@@ -6907,13 +7392,101 @@ class SopStore:
                                     preserved_fields.append(field)
                             content["locked_fields"] = locked_fields
                         preserved_by_type[direction_type] = preserved_fields
+
+                    locked_output = [content_by_type[item] for item in DIRECTION_TYPES]
+                    locked_issues, locked_diversity = validate_direction_set(
+                        locked_output,
+                        source_text=source_text,
+                    )
+                    if locked_issues:
+                        locked_validation = {
+                            **validation,
+                            "valid": False,
+                            "final_issues": locked_issues,
+                            "diversity": locked_diversity,
+                            "locked_overlay_invalid": True,
+                        }
+                        self._record_direction_run_locked(
+                            connection,
+                            run_id=run_id,
+                            project_id=project_id,
+                            poem_id=poem_id,
+                            requirement_id=requirement["id"],
+                            input_hash=input_hash,
+                            status="failed",
+                            cache_hit=cache_hit,
+                            repair_attempts=validation["repair_attempts"],
+                            raw_output=raw_output,
+                            normalized_output=normalized_output,
+                            validation=locked_validation,
+                            error_code="LOCKED_DIRECTION_SET_INVALID",
+                            error_message=locked_issues[0]["message"],
+                            direction_ids=[],
+                            actor_id=actor_id,
+                            now=now,
+                        )
+                        connection.execute(
+                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
+                            ("锁定字段破坏了三方向差异门禁，请人工修订。", now, poem_id),
+                        )
+                        self._audit(
+                            connection,
+                            actor=actor,
+                            action="direction.generation_failed",
+                            target_type="direction_generation_run",
+                            target_id=run_id,
+                            after={
+                                "poem_id": poem_id,
+                                "error_code": "LOCKED_DIRECTION_SET_INVALID",
+                                "issues": locked_issues[:8],
+                            },
+                        )
+                        results.append(
+                            {
+                                "poem_id": poem_id,
+                                "ok": False,
+                                "run_id": run_id,
+                                "code": "LOCKED_DIRECTION_SET_INVALID",
+                                "message": "锁定字段破坏了三方向差异门禁。",
+                                "issues": locked_issues[:8],
+                            }
+                        )
+                        continue
+
+                    generated: list[str] = []
+                    generation_validation = {
+                        **validation,
+                        "input_hash": input_hash,
+                        "cache_hit": cache_hit,
+                        "run_id": run_id,
+                        "locked_fields_preserved": preserved_by_type,
+                        "diversity": locked_diversity,
+                    }
+                    for direction_type in DIRECTION_TYPES:
+                        current = current_by_type.get(direction_type)
+                        version = connection.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+                            FROM directions WHERE poem_id = ? AND type = ?
+                            """,
+                            (poem_id, direction_type),
+                        ).fetchone()["next_version"]
+                        if current:
+                            connection.execute(
+                                "UPDATE directions SET is_current = 0, updated_at = ? WHERE id = ?",
+                                (now, current["id"]),
+                            )
+                        direction_id = _new_id("dir")
+                        content = content_by_type[direction_type]
                         connection.execute(
                             """
                             INSERT INTO directions(
                                 id, poem_id, requirement_id, version, type,
                                 is_current, content_json, status, created_by,
-                                created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, 1, ?, 'in_review', ?, ?, ?)
+                                created_at, updated_at, schema_version,
+                                generator_version, input_hash, cache_hit,
+                                validation_json, generation_run_id
+                            ) VALUES (?, ?, ?, ?, ?, 1, ?, 'in_review', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 direction_id,
@@ -6925,6 +7498,12 @@ class SopStore:
                                 actor_id,
                                 now,
                                 now,
+                                DIRECTION_SCHEMA_VERSION,
+                                DIRECTION_GENERATOR_VERSION,
+                                input_hash,
+                                int(cache_hit),
+                                _json(generation_validation),
+                                run_id,
                             ),
                         )
                         self._audit(
@@ -6933,30 +7512,63 @@ class SopStore:
                             action="direction.generated",
                             target_type="direction",
                             target_id=direction_id,
-                            before=dict(current) if current else None,
+                            before=self._direction_dict(current) if current else None,
                             after={
                                 "id": direction_id,
                                 "type": direction_type,
                                 "version": version,
                                 "status": "in_review",
                                 "content": content,
+                                "schema_version": DIRECTION_SCHEMA_VERSION,
+                                "generation_run_id": run_id,
                             },
                         )
                         generated.append(direction_id)
                     connection.execute(
                         """
-                        UPDATE poems
-                        SET status = 'direction_review', updated_at = ?
-                        WHERE id = ?
+                        UPDATE poems SET status = 'direction_review',
+                            blocked_reason = '', updated_at = ? WHERE id = ?
                         """,
                         (now, poem_id),
+                    )
+                    self._record_direction_run_locked(
+                        connection,
+                        run_id=run_id,
+                        project_id=project_id,
+                        poem_id=poem_id,
+                        requirement_id=requirement["id"],
+                        input_hash=input_hash,
+                        status="succeeded",
+                        cache_hit=cache_hit,
+                        repair_attempts=validation["repair_attempts"],
+                        raw_output=raw_output,
+                        normalized_output=normalized_output,
+                        validation=generation_validation,
+                        error_code="",
+                        error_message="",
+                        direction_ids=generated,
+                        actor_id=actor_id,
+                        now=now,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE direction_generation_runs SET resolved_at = ?
+                        WHERE poem_id = ? AND status = 'failed'
+                          AND resolved_at IS NULL AND id != ?
+                        """,
+                        (now, poem_id, run_id),
                     )
                     results.append(
                         {
                             "poem_id": poem_id,
                             "ok": True,
                             "direction_ids": generated,
+                            "run_id": run_id,
                             "preserved_fields": preserved_by_type,
+                            "cache_hit": cache_hit,
+                            "repair_attempts": validation["repair_attempts"],
+                            "input_hash": input_hash,
+                            "diversity": locked_diversity,
                         }
                     )
                 connection.execute("COMMIT")
@@ -7010,6 +7622,16 @@ class SopStore:
                     raise WorkflowError(
                         "INVALID_DIRECTION_STATE",
                         "只有待审核或已退回方向可以执行此操作。",
+                        status=409,
+                    )
+                validation = _decode(row["validation_json"], {})
+                if (
+                    row["schema_version"] != DIRECTION_SCHEMA_VERSION
+                    or validation.get("valid") is not True
+                ):
+                    raise WorkflowError(
+                        "DIRECTION_SCHEMA_REVIEW_REQUIRED",
+                        "该方向不是当前 Schema 的已验证版本，请重新生成或修订后再批准。",
                         status=409,
                     )
                 now = utc_now()
@@ -7134,20 +7756,28 @@ class SopStore:
             raise WorkflowError("INVALID_DIRECTION_CONTENT", "方向内容必须是对象。")
         allowed_text = {
             "title",
+            "visual_thesis",
             "subject",
+            "subject_mode",
+            "scene",
             "shot",
+            "shot_scale",
+            "narrative_mode",
             "foreground",
             "midground",
             "background",
             "action",
+            "composition",
             "lighting",
             "palette",
             "whitespace",
+            "text_safe_area",
             "risk_note",
             "art_director_note",
         }
         allowed_lists = {"preserve", "avoid", "locked_fields"}
-        unknown = set(updates) - allowed_text - allowed_lists - {"type"}
+        allowed_objects = {"interpretation_layers"}
+        unknown = set(updates) - allowed_text - allowed_lists - allowed_objects - {"type"}
         if unknown:
             raise WorkflowError(
                 "INVALID_DIRECTION_FIELD",
@@ -7179,11 +7809,14 @@ class SopStore:
                     for item in value[:30]
                     if str(item).strip()
                 ]
-        for required in ("title", "subject", "shot"):
-            if not str(result.get(required) or "").strip():
+        if "interpretation_layers" in updates:
+            layers = updates.get("interpretation_layers")
+            if not isinstance(layers, dict):
                 raise WorkflowError(
-                    "DIRECTION_FIELD_REQUIRED", f"方向字段 {required} 不能为空。"
+                    "INVALID_DIRECTION_CONTENT",
+                    "字段 interpretation_layers 必须是对象。",
                 )
+            result["interpretation_layers"] = _decode(_json(layers), {})
         return result
 
     @staticmethod
@@ -7254,6 +7887,58 @@ class SopStore:
                 next_content = self._normalize_direction_content(
                     source_content, content or {}
                 )
+                requirement = connection.execute(
+                    "SELECT * FROM requirements WHERE id = ?",
+                    (row["requirement_id"],),
+                ).fetchone()
+                content_version = (
+                    connection.execute(
+                        "SELECT * FROM content_versions WHERE id = ?",
+                        (requirement["content_version_id"],),
+                    ).fetchone()
+                    if requirement
+                    else None
+                )
+                if not content_version:
+                    raise WorkflowError(
+                        "APPROVED_CONTENT_REQUIRED",
+                        "修订方向前必须能定位其 ContentVersion。",
+                        status=409,
+                    )
+                source_text = "，".join(
+                    _decode(content_version["lines_json"], [])
+                )
+                proposal_issues = validate_direction_proposal(
+                    next_content,
+                    source_text=source_text,
+                )
+                if proposal_issues:
+                    first = proposal_issues[0]
+                    raise WorkflowError(
+                        "DIRECTION_SCHEMA_INVALID",
+                        f"方向未通过 Schema：{first['path']} {first['message']}",
+                    )
+                sibling_rows = connection.execute(
+                    """
+                    SELECT * FROM directions
+                    WHERE poem_id = ? AND is_current = 1 AND id != ?
+                    """,
+                    (row["poem_id"], direction_id),
+                ).fetchall()
+                proposed_set = [
+                    next_content,
+                    *[_decode(item["content_json"], {}) for item in sibling_rows],
+                ]
+                set_issues, diversity = validate_direction_set(
+                    proposed_set,
+                    source_text=source_text,
+                )
+                if set_issues:
+                    first = set_issues[0]
+                    raise WorkflowError(
+                        "DIRECTION_SET_INVALID",
+                        f"修订会破坏三方向门禁：{first['message']}",
+                    )
                 next_version = connection.execute(
                     """
                     SELECT COALESCE(MAX(version), 0) + 1 AS next_version
@@ -7271,8 +7956,10 @@ class SopStore:
                     """
                     INSERT INTO directions(
                         id, poem_id, requirement_id, version, type, is_current,
-                        content_json, status, created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 'in_review', ?, ?, ?)
+                        content_json, status, created_by, created_at, updated_at,
+                        schema_version, generator_version, input_hash, cache_hit,
+                        validation_json, generation_run_id
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, 'in_review', ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         next_id,
@@ -7284,6 +7971,21 @@ class SopStore:
                         actor_id,
                         now,
                         now,
+                        DIRECTION_SCHEMA_VERSION,
+                        row["generator_version"],
+                        row["input_hash"],
+                        _json(
+                            {
+                                "schema_version": DIRECTION_SCHEMA_VERSION,
+                                "valid": True,
+                                "repair_attempts": 0,
+                                "manual_revision": True,
+                                "source_direction_id": direction_id,
+                                "diversity": diversity,
+                                "final_issues": [],
+                            }
+                        ),
+                        row["generation_run_id"],
                     ),
                 )
                 poem_status = self._direction_poem_status_locked(

@@ -614,8 +614,13 @@
         <div class="dialog-body form-stack">
           <div class="import-guidance"><strong>保存会创建新版本</strong><p>旧版本保留用于追溯；方向一旦进入生产任务即冻结，只能通过返工单调整成图。</p></div>
           <label><span>方向标题</span><input class="dialog-input" name="title" maxlength="300" required /></label>
+          <label><span>视觉命题</span><textarea class="dialog-textarea" name="visual_thesis" rows="2" required></textarea></label>
           <label><span>主体</span><textarea class="dialog-textarea" name="subject" rows="2" required></textarea></label>
           <div class="form-grid two-columns">
+            <label><span>主体模式</span><select class="dialog-input" name="subject_mode"><option value="human_focus">人物主导</option><option value="environment_focus">环境主导</option><option value="object_focus">物象主导</option></select></label>
+            <label><span>景别尺度</span><select class="dialog-input" name="shot_scale"><option value="wide">远景 / 大全景</option><option value="medium">中景 / 中远景</option><option value="close">近景 / 特写</option></select></label>
+            <label><span>视觉叙事</span><input class="dialog-input" name="narrative_mode" readonly /></label>
+            <label><span>场景</span><input class="dialog-input" name="scene" maxlength="1000" required /></label>
             <label><span>景别</span><input class="dialog-input" name="shot" maxlength="500" required /></label>
             <label><span>留白</span><input class="dialog-input" name="whitespace" maxlength="500" /></label>
             <label><span>前景</span><textarea class="dialog-textarea" name="foreground" rows="2"></textarea></label>
@@ -624,12 +629,20 @@
             <label><span>动作</span><textarea class="dialog-textarea" name="action" rows="2"></textarea></label>
             <label><span>光线</span><input class="dialog-input" name="lighting" maxlength="500" /></label>
             <label><span>色彩</span><input class="dialog-input" name="palette" maxlength="500" /></label>
+            <label><span>文字安全区</span><input class="dialog-input" name="text_safe_area" maxlength="1000" required /></label>
           </div>
+          <label><span>构图结构</span><textarea class="dialog-textarea" name="composition" rows="3" required></textarea></label>
           <div class="form-grid two-columns">
             <label><span>保持项（每行一条）</span><textarea class="dialog-textarea" name="preserve" rows="5"></textarea></label>
             <label><span>禁止项（每行一条）</span><textarea class="dialog-textarea" name="avoid" rows="5"></textarea></label>
           </div>
           <label><span>历史 / 制作风险</span><textarea class="dialog-textarea" name="risk_note" rows="2"></textarea></label>
+          <div class="interpretation-editor">
+            <strong>解释分层</strong><p>每行使用“结论 | 依据”格式。诗文事实的依据必须能在当前正文中定位。</p>
+            <label><span>诗文事实 | 原诗引用</span><textarea class="dialog-textarea" name="poem_facts" rows="3" required></textarea></label>
+            <label><span>合理演绎 | 推导依据</span><textarea class="dialog-textarea" name="reasonable_inferences" rows="3" required></textarea></label>
+            <label><span>创意表达 | 生产目的</span><textarea class="dialog-textarea" name="creative_choices" rows="3" required></textarea></label>
+          </div>
           <label><span>美术指导备注</span><textarea class="dialog-textarea" name="art_director_note" rows="2"></textarea></label>
           <label><span>锁定字段（每行一个字段名）</span><textarea class="dialog-textarea" name="locked_fields" rows="2" placeholder="subject&#10;shot"></textarea></label>
         </div>
