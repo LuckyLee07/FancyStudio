@@ -26,7 +26,16 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+from backup_service import create_backup, list_backups, verify_backup
+from qc_engine import QC_VERSION, inspect_image
+from requirement_schema import schema_document as requirement_schema_document
+from sop_store import (
+    DEFAULT_PROJECT_ID as SOP_DEFAULT_PROJECT_ID,
+    SopStore,
+    WorkflowError,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -36,7 +45,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.9.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -61,12 +70,42 @@ def read_json(path: Path, default: Any) -> Any:
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    os.replace(temp, path)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, payload: str) -> None:
+    atomic_write_bytes(path, payload.encode("utf-8"))
+
+
+def structured_log(event: str, *, level: str = "info", **fields: Any) -> None:
+    if event in {"task.claimed", "task.succeeded"} and os.environ.get(
+        "TANG_VERBOSE_TASK_LOGS", ""
+    ).lower() not in {"1", "true", "yes"}:
+        return
+    record = {
+        "time": utc_now(),
+        "level": level,
+        "event": str(event)[:100],
+    }
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            record[str(key)[:60]] = value if not isinstance(value, str) else value[:1000]
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")), flush=True)
 
 
 class StudioStore:
@@ -94,10 +133,9 @@ class StudioStore:
                     "updated_at": utc_now(),
                 }
             )
-        project_ids = {item["id"] for item in self.projects}
         fallback_project_id = self.projects[0]["id"]
         for image in self.images:
-            if image.get("project_id") not in project_ids:
+            if not image.get("project_id"):
                 image["project_id"] = fallback_project_id
             image_project = next(
                 (
@@ -115,7 +153,7 @@ class StudioStore:
             image.setdefault("review_note", "")
             image.setdefault("qc", {})
         for job in self.jobs:
-            if job.get("project_id") not in project_ids:
+            if not job.get("project_id"):
                 job["project_id"] = fallback_project_id
             job.setdefault("generation_mode", "explore")
             job.setdefault("parent_image_id", None)
@@ -190,6 +228,33 @@ class StudioStore:
 
 
 STORE: StudioStore | None = None
+SOP_STORE: SopStore | None = None
+BATCH_WORKERS: dict[str, threading.Thread] = {}
+BATCH_WORKERS_LOCK = threading.RLock()
+
+
+def _batch_concurrency() -> int:
+    try:
+        return max(1, min(int(os.getenv("TANG_BATCH_CONCURRENCY", "2")), 8))
+    except ValueError:
+        return 2
+
+
+BATCH_TASK_SEMAPHORE = threading.Semaphore(_batch_concurrency())
+
+
+def get_sop_store() -> SopStore:
+    """Return a workflow store bound to the active data directory.
+
+    Tests replace DATA_DIR at runtime, so the binding is refreshed whenever the
+    desired database path changes.
+    """
+
+    global SOP_STORE
+    database_path = (DATA_DIR / "studio.db").resolve()
+    if SOP_STORE is None or SOP_STORE.database_path != database_path:
+        SOP_STORE = SopStore(database_path, POEMS_FILE, STYLES_FILE)
+    return SOP_STORE
 
 
 def provider_name() -> str:
@@ -197,6 +262,123 @@ def provider_name() -> str:
     if requested == "auto":
         return "openai" if os.getenv("OPENAI_API_KEY") else "demo"
     return requested
+
+
+class ProviderCircuitBreaker:
+    def __init__(self, threshold: int = 5, cooldown_seconds: int = 60) -> None:
+        self.threshold = max(2, int(threshold))
+        self.cooldown_seconds = max(1, int(cooldown_seconds))
+        self.lock = threading.RLock()
+        self.states: dict[str, dict[str, Any]] = {}
+
+    def status(self, provider: str) -> dict[str, Any]:
+        provider = str(provider).strip().lower()
+        with self.lock:
+            state = self.states.setdefault(
+                provider,
+                {"failures": 0, "open_until": 0.0, "last_error_code": ""},
+            )
+            now = time.monotonic()
+            if state["open_until"] and state["open_until"] <= now:
+                state.update(failures=0, open_until=0.0, last_error_code="")
+            remaining = max(0, round(state["open_until"] - now))
+            return {
+                "state": "open" if remaining > 0 else "closed",
+                "failure_count": int(state["failures"]),
+                "threshold": self.threshold,
+                "cooldown_seconds": self.cooldown_seconds,
+                "retry_after_seconds": remaining,
+                "last_error_code": state["last_error_code"],
+            }
+
+    def record_success(self, provider: str) -> None:
+        with self.lock:
+            self.states[str(provider).strip().lower()] = {
+                "failures": 0,
+                "open_until": 0.0,
+                "last_error_code": "",
+            }
+
+    def record_failure(self, provider: str, error_code: str) -> dict[str, Any]:
+        provider = str(provider).strip().lower()
+        with self.lock:
+            state = self.states.setdefault(
+                provider,
+                {"failures": 0, "open_until": 0.0, "last_error_code": ""},
+            )
+            state["failures"] += 1
+            state["last_error_code"] = str(error_code)[:80]
+            if state["failures"] >= self.threshold:
+                state["open_until"] = time.monotonic() + self.cooldown_seconds
+        return self.status(provider)
+
+    def reset(self, provider: str | None = None) -> None:
+        with self.lock:
+            if provider is None:
+                self.states.clear()
+            else:
+                self.states.pop(str(provider).strip().lower(), None)
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(os.getenv(name, str(default))), maximum))
+    except ValueError:
+        return default
+
+
+PROVIDER_CIRCUITS = ProviderCircuitBreaker(
+    threshold=_env_int("TANG_PROVIDER_CIRCUIT_THRESHOLD", 5, 2, 20),
+    cooldown_seconds=_env_int("TANG_PROVIDER_CIRCUIT_COOLDOWN", 60, 5, 3600),
+)
+
+
+def provider_runtime_status() -> dict[str, Any]:
+    """Expose safe operational settings without leaking provider credentials."""
+
+    provider = provider_name()
+    configured = provider == "demo" or bool(os.getenv("OPENAI_API_KEY"))
+    circuit = PROVIDER_CIRCUITS.status(provider)
+    return {
+        "provider": provider,
+        "model": (
+            "demo-renderer"
+            if provider == "demo"
+            else os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+        ),
+        "status": (
+            "circuit_open"
+            if circuit["state"] == "open"
+            else "ready"
+            if configured
+            else "configuration_required"
+        ),
+        "configured": configured,
+        "live_generation": provider == "openai" and configured,
+        "concurrency": _batch_concurrency(),
+        "timeouts_seconds": {
+            "generation": 240,
+            "edit": 300,
+            "download": 120,
+        },
+        "max_attempts": 3,
+        "circuit": circuit,
+        "capabilities": {
+            "generation": provider in {"demo", "openai"},
+            "image_edit": provider == "openai",
+            "aspect_ratios": ["portrait", "square", "landscape"],
+            "max_images_per_direction": 4,
+        },
+    }
+
+
+def present_export_package(package: dict[str, Any]) -> dict[str, Any]:
+    result = dict(package)
+    if result.get("status") == "completed":
+        result["manifest_url"] = f"/exports/{result['name']}/manifest.json"
+    else:
+        result["manifest_url"] = None
+    return result
 
 
 def build_prompt(
@@ -276,9 +458,16 @@ def render_demo_svg(
     poem: dict[str, Any],
     style: dict[str, Any],
     sample_index: int,
+    aspect_ratio: str = "portrait",
 ) -> None:
     """Render a stylized local fallback, deliberately labelled as demo artwork."""
-    width, height = 1024, 1280
+    width, height = {
+        "portrait": (1024, 1536),
+        "square": (1024, 1024),
+        "landscape": (1536, 1024),
+    }.get(aspect_ratio, (1024, 1536))
+    scale_x = width / 1024
+    scale_y = height / 1280
     bg = style["background"]
     fg = style["foreground"]
     accent = style["accent"]
@@ -378,13 +567,15 @@ def render_demo_svg(
     <filter id="{blur_id}"><feGaussianBlur stdDeviation="34"/></filter>
     <linearGradient id="wash-{seed}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{pale}"/><stop offset="1" stop-color="{bg}"/></linearGradient>
   </defs>
-  <rect width="1024" height="1280" fill="url(#wash-{seed})"/>
-  {''.join(scene)}
-  {frame}
-  <rect width="1024" height="1280" filter="url(#{texture_id})" opacity=".72"/>
+  <g transform="scale({scale_x:.6f} {scale_y:.6f})">
+    <rect width="1024" height="1280" fill="url(#wash-{seed})"/>
+    {''.join(scene)}
+    {frame}
+    <rect width="1024" height="1280" filter="url(#{texture_id})" opacity=".72"/>
+  </g>
 </svg>'''
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(svg, encoding="utf-8")
+    atomic_write_text(output, svg)
 
 
 def generate_openai_image(
@@ -435,11 +626,17 @@ def generate_openai_image(
     item = data[0]
     output.parent.mkdir(parents=True, exist_ok=True)
     if item.get("b64_json"):
-        output.write_bytes(base64.b64decode(item["b64_json"]))
+        payload = base64.b64decode(item["b64_json"])
+        if len(payload) > 50_000_000:
+            raise RuntimeError("图像接口返回的文件超过 50 MB 安全上限。")
+        atomic_write_bytes(output, payload)
         return
     if item.get("url"):
         with urllib.request.urlopen(item["url"], timeout=120) as response:
-            output.write_bytes(response.read())
+            payload = response.read(50_000_001)
+        if len(payload) > 50_000_000:
+            raise RuntimeError("图像接口返回的文件超过 50 MB 安全上限。")
+        atomic_write_bytes(output, payload)
         return
     raise RuntimeError("图像接口响应中缺少 b64_json 或 url。")
 
@@ -529,7 +726,10 @@ def edit_openai_image(
     if not data or not data[0].get("b64_json"):
         raise RuntimeError("图像编辑接口没有返回可保存的图片数据。")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(base64.b64decode(data[0]["b64_json"]))
+    payload = base64.b64decode(data[0]["b64_json"])
+    if len(payload) > 50_000_000:
+        raise RuntimeError("图像接口返回的文件超过 50 MB 安全上限。")
+    atomic_write_bytes(output, payload)
 
 
 def local_image_path(image: dict[str, Any]) -> Path:
@@ -553,6 +753,7 @@ def create_image_record(
     generation_mode: str = "explore",
     parent_image_id: str | None = None,
     preserve: list[str] | None = None,
+    compiled_prompt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     image_id = uuid.uuid4().hex
     extension = "svg" if provider == "demo" else "png"
@@ -566,9 +767,11 @@ def create_image_record(
         "preserve": preserve or [],
         "sample_index": index,
     }
-    prompt = build_prompt(poem, style, custom_note, workflow)
+    prompt = str((compiled_prompt or {}).get("text") or "")
+    if not prompt:
+        prompt = build_prompt(poem, style, custom_note, workflow)
     if provider == "demo":
-        render_demo_svg(output, poem, style, index)
+        render_demo_svg(output, poem, style, index, aspect_ratio)
     elif provider == "openai":
         if generation_mode == "converge" and parent_image_id:
             assert STORE is not None
@@ -597,6 +800,10 @@ def create_image_record(
         "url": f"/generated/{filename}",
         "aspect_ratio": aspect_ratio,
         "prompt": prompt,
+        "prompt_hash": str((compiled_prompt or {}).get("hash") or ""),
+        "prompt_template_version": str(
+            (compiled_prompt or {}).get("template_version") or ""
+        ),
         "generation_mode": generation_mode,
         "parent_image_id": parent_image_id,
         "decision": "candidate",
@@ -665,6 +872,343 @@ def run_generation_job(job_id: str) -> None:
             image_ids=image_ids,
             finished_at=utc_now(),
         )
+
+
+def estimated_unit_cost(provider: str) -> float:
+    if provider == "demo":
+        return 0.0
+    try:
+        return max(0.0, float(os.getenv("TANG_IMAGE_ESTIMATED_COST", "0.06")))
+    except ValueError:
+        return 0.06
+
+
+def _batch_task_poem(task: dict[str, Any]) -> dict[str, Any]:
+    prompt = task.get("prompt") or {}
+    poem = dict(prompt.get("poem") or {})
+    requirement = (prompt.get("requirement") or {}).get("content") or {}
+    direction = (prompt.get("direction") or {}).get("content") or {}
+    poem["lines"] = poem.get("lines") or task.get("lines") or []
+    poem["theme"] = poem.get("theme") or task.get("theme", "")
+    poem["mood"] = poem.get("mood") or task.get("mood", "")
+    poem["imagery"] = requirement.get("core_imagery") or []
+    poem["avoid"] = list(
+        dict.fromkeys(
+            [
+                *(requirement.get("avoid") or []),
+                *(direction.get("avoid") or []),
+            ]
+        )
+    )
+    poem["visual_brief"] = "；".join(
+        item
+        for item in (
+            direction.get("subject"),
+            direction.get("shot"),
+            direction.get("foreground"),
+            direction.get("midground"),
+            direction.get("background"),
+            direction.get("action"),
+            direction.get("lighting"),
+            direction.get("palette"),
+            direction.get("whitespace"),
+        )
+        if item
+    )
+    return poem
+
+
+def _batch_task_note(task: dict[str, Any]) -> str:
+    prompt = task.get("prompt") or {}
+    direction = (prompt.get("direction") or {}).get("content") or {}
+    rework = prompt.get("rework") or {}
+    preserve = "、".join(direction.get("preserve") or [])
+    avoid = "、".join(direction.get("avoid") or [])
+    pieces = [
+        f"画面方向：{direction.get('title', '')}",
+        f"主体：{direction.get('subject', '')}",
+        f"景别：{direction.get('shot', '')}",
+        f"前景：{direction.get('foreground', '')}",
+        f"中景：{direction.get('midground', '')}",
+        f"背景：{direction.get('background', '')}",
+        f"光线：{direction.get('lighting', '')}",
+        f"色彩：{direction.get('palette', '')}",
+        f"留白：{direction.get('whitespace', '')}",
+        f"必须保持：{preserve}",
+        f"禁止：{avoid}",
+    ]
+    if rework:
+        pieces.extend(
+            [
+                f"返工保持：{'、'.join(rework.get('preserve') or [])}",
+                f"返工修改：{'、'.join(rework.get('change') or [])}",
+                f"返工禁止：{'、'.join(rework.get('avoid') or [])}",
+                f"返工备注：{rework.get('note', '')}",
+            ]
+        )
+    return "；".join(piece for piece in pieces if not piece.endswith("："))
+
+
+def _classify_batch_error(exc: Exception) -> tuple[str, bool]:
+    message = str(exc)
+    lowered = message.lower()
+    if "429" in lowered or "rate" in lowered:
+        return "RATE_LIMITED", True
+    if any(code in lowered for code in ("500", "502", "503", "504")):
+        return "PROVIDER_UNAVAILABLE", True
+    if any(term in lowered for term in ("timeout", "超时", "无法连接", "temporar")):
+        return "NETWORK_ERROR", True
+    if "content" in lowered and "policy" in lowered:
+        return "CONTENT_BLOCKED", False
+    return "GENERATION_FAILED", False
+
+
+def register_image_qc(
+    store: SopStore,
+    record: dict[str, Any],
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        inspection = inspect_image(
+            local_image_path(record),
+            task["aspect_ratio"],
+        )
+    except Exception as exc:
+        inspection = {
+            "version": QC_VERSION,
+            "status": "manual_required",
+            "score": 0,
+            "hard_failures": [],
+            "warnings": [f"qc_engine_unavailable: {exc}"],
+            "checks": {"inspection_completed": False},
+            "coverage": [],
+            "file_path": "",
+            "mime_type": "",
+            "checksum": "",
+            "perceptual_hash": "",
+            "file_size": 0,
+            "width": 0,
+            "height": 0,
+        }
+    production_image = store.register_production_image(record, task, inspection)
+    qc = production_image.get("qc") or {}
+    if STORE is not None:
+        STORE.update_image(
+            record["id"],
+            production_status=production_image["status"],
+            qc_status=qc.get("status"),
+            qc_score=qc.get("score"),
+            qc_hard_failures=qc.get("hard_failures", []),
+            qc_warnings=qc.get("warnings", []),
+        )
+    return production_image
+
+
+def run_batch_worker(batch_id: str) -> None:
+    assert STORE is not None
+    store = get_sop_store()
+    structured_log("batch.worker_started", batch_id=batch_id)
+    try:
+        while True:
+            state = store.execution_state(batch_id)
+            if state["batch"]["status"] not in {"queued", "running"}:
+                return
+            circuit = PROVIDER_CIRCUITS.status(state["batch"]["provider"])
+            if circuit["state"] == "open":
+                paused = store.pause_provider_batches(
+                    state["batch"]["provider"],
+                    reason=(
+                        "Provider 连续失败触发熔断；"
+                        f"约 {circuit['retry_after_seconds']} 秒后可人工恢复。"
+                    ),
+                    actor={"id": "provider-circuit", "role": "system"},
+                )
+                structured_log(
+                    "provider.circuit_paused_batches",
+                    level="warning",
+                    provider=state["batch"]["provider"],
+                    batch_id=batch_id,
+                    paused_count=len(paused),
+                    retry_after_seconds=circuit["retry_after_seconds"],
+                )
+                return
+            task = store.claim_next_task(batch_id)
+            if task is None:
+                state = store.execution_state(batch_id)
+                if state["batch"]["status"] not in {"queued", "running"}:
+                    return
+                if state["counts"].get("retry_waiting", 0):
+                    time.sleep(0.25)
+                    continue
+                return
+            started = time.monotonic()
+            structured_log(
+                "task.claimed",
+                batch_id=batch_id,
+                task_id=task["id"],
+                attempt_id=task["attempt_id"],
+                provider=task["provider"],
+            )
+            try:
+                with BATCH_TASK_SEMAPHORE:
+                    existing = next(
+                        (
+                            image
+                            for image in STORE.images
+                            if image.get("sop_task_id") == task["id"]
+                        ),
+                        None,
+                    )
+                    if existing:
+                        production_image = register_image_qc(store, existing, task)
+                        store.complete_task(
+                            task["id"],
+                            task["attempt_id"],
+                            output_image_id=existing["id"],
+                            actual_cost=0,
+                            duration_ms=round((time.monotonic() - started) * 1000),
+                            response={
+                                "recovered_existing_image": True,
+                                "production_status": production_image["status"],
+                            },
+                        )
+                        structured_log(
+                            "task.succeeded",
+                            batch_id=batch_id,
+                            task_id=task["id"],
+                            attempt_id=task["attempt_id"],
+                            image_id=existing["id"],
+                            recovered=True,
+                        )
+                        PROVIDER_CIRCUITS.record_success(task["provider"])
+                        continue
+                    style = (task.get("prompt") or {}).get("style")
+                    if not isinstance(style, dict):
+                        style = STORE.style_by_id.get(task["style_id"])
+                    if not style:
+                        raise RuntimeError("批次绑定的风格版本不存在。")
+                    project = store.project(task["project_id"])
+                    poem = _batch_task_poem(task)
+                    rework = (task.get("prompt") or {}).get("rework") or {}
+                    record = create_image_record(
+                        task["id"],
+                        poem,
+                        style,
+                        task["sample_index"] + int(time.time()),
+                        task["provider"],
+                        task["aspect_ratio"],
+                        _batch_task_note(task),
+                        {
+                            "id": project["id"],
+                            "name": project["name"],
+                            "purpose": project["purpose"],
+                        },
+                        "converge" if rework else "explore",
+                        rework.get("parent_image_id"),
+                        rework.get("preserve") or [],
+                        compiled_prompt=(task.get("prompt") or {}).get("compiled"),
+                    )
+                    record.update(
+                        {
+                            "sop_batch_id": batch_id,
+                            "sop_task_id": task["id"],
+                            "direction_id": task["direction_id"],
+                            "idempotency_key": task["idempotency_key"],
+                            "rework_order_id": task.get("rework_order_id"),
+                        }
+                    )
+                    STORE.add_image(record)
+                    production_image = register_image_qc(store, record, task)
+                    actual_cost = (
+                        0.0
+                        if task["provider"] == "demo"
+                        else float(task["batch_settings"].get("unit_cost", 0))
+                    )
+                    store.complete_task(
+                        task["id"],
+                        task["attempt_id"],
+                        output_image_id=record["id"],
+                        actual_cost=actual_cost,
+                        duration_ms=round((time.monotonic() - started) * 1000),
+                        response={
+                            "image_id": record["id"],
+                            "url": record["url"],
+                            "production_status": production_image["status"],
+                            "qc_result_id": (production_image.get("qc") or {}).get("id"),
+                        },
+                    )
+                    structured_log(
+                        "task.succeeded",
+                        batch_id=batch_id,
+                        task_id=task["id"],
+                        attempt_id=task["attempt_id"],
+                        image_id=record["id"],
+                        duration_ms=round((time.monotonic() - started) * 1000),
+                    )
+                    PROVIDER_CIRCUITS.record_success(task["provider"])
+            except Exception as exc:
+                error_code, retryable = _classify_batch_error(exc)
+                store.fail_task(
+                    task["id"],
+                    task["attempt_id"],
+                    error_code=error_code,
+                    error_message=str(exc),
+                    retryable=retryable,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                )
+                structured_log(
+                    "task.failed",
+                    level="error" if not retryable else "warning",
+                    batch_id=batch_id,
+                    task_id=task["id"],
+                    attempt_id=task["attempt_id"],
+                    error_code=error_code,
+                    retryable=retryable,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                )
+                if retryable:
+                    circuit = PROVIDER_CIRCUITS.record_failure(
+                        task["provider"], error_code
+                    )
+                    if circuit["state"] == "open":
+                        paused = store.pause_provider_batches(
+                            task["provider"],
+                            reason=(
+                                "Provider 连续失败触发熔断；"
+                                f"约 {circuit['retry_after_seconds']} 秒后可人工恢复。"
+                            ),
+                            actor={"id": "provider-circuit", "role": "system"},
+                        )
+                        structured_log(
+                            "provider.circuit_opened",
+                            level="error",
+                            provider=task["provider"],
+                            batch_id=batch_id,
+                            paused_count=len(paused),
+                            error_code=error_code,
+                            retry_after_seconds=circuit["retry_after_seconds"],
+                        )
+    finally:
+        with BATCH_WORKERS_LOCK:
+            current = BATCH_WORKERS.get(batch_id)
+            if current is threading.current_thread():
+                BATCH_WORKERS.pop(batch_id, None)
+        structured_log("batch.worker_stopped", batch_id=batch_id)
+
+
+def ensure_batch_worker(batch_id: str) -> None:
+    with BATCH_WORKERS_LOCK:
+        current = BATCH_WORKERS.get(batch_id)
+        if current and current.is_alive():
+            return
+        worker = threading.Thread(
+            target=run_batch_worker,
+            args=(batch_id,),
+            daemon=True,
+            name=f"batch-{batch_id[-8:]}",
+        )
+        BATCH_WORKERS[batch_id] = worker
+        worker.start()
 
 
 def seed_demo_gallery() -> None:
@@ -743,18 +1287,60 @@ def seed_demo_gallery() -> None:
 class StudioHandler(BaseHTTPRequestHandler):
     server_version = f"TangPoemStudio/{APP_VERSION}"
 
+    def _request_id(self) -> str:
+        current = getattr(self, "request_id", "")
+        if current:
+            return current
+        incoming = self.headers.get("X-Request-ID", "") if self.headers else ""
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", incoming):
+            incoming = f"req_{uuid.uuid4().hex}"
+        self.request_id = incoming
+        return incoming
+
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"[{self.log_date_time_string()}] {format % args}")
+        path = urlparse(getattr(self, "path", "")).path
+        context: dict[str, Any] = {}
+        for field, pattern in (
+            ("batch_id", r"(batch_[a-f0-9]{32})"),
+            ("task_id", r"(task_[a-f0-9]{32})"),
+            ("image_id", r"/api/images/([a-f0-9]{32})"),
+        ):
+            match = re.search(pattern, path)
+            if match:
+                context[field] = match.group(1)
+        structured_log(
+            "http.request",
+            request_id=self._request_id(),
+            method=getattr(self, "command", ""),
+            path=path,
+            status=args[1] if len(args) > 1 else None,
+            message=(format % args),
+            **context,
+        )
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
+        request_id = self._request_id()
+        if int(status) >= 400 and isinstance(payload, dict) and "request_id" not in payload:
+            payload = {**payload, "request_id": request_id}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Request-ID", request_id)
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_workflow_error(self, exc: WorkflowError) -> None:
+        self._send_json(
+            {
+                "code": exc.code,
+                "message": str(exc),
+                "request_id": self._request_id(),
+            },
+            exc.status,
+        )
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -776,6 +1362,7 @@ class StudioHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "public, max-age=86400" if cache else "no-cache")
+        self.send_header("X-Request-ID", self._request_id())
         self.end_headers()
         if not head_only:
             self.wfile.write(data)
@@ -802,15 +1389,21 @@ class StudioHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         assert STORE is not None
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == "/api/health":
+            workflow_health = get_sop_store().health()
+            provider_status = provider_runtime_status()
             self._send_json(
                 {
-                    "ok": True,
+                    "ok": workflow_health["status"] == "ok",
                     "version": APP_VERSION,
                     "provider": provider_name(),
                     "live_generation": provider_name() == "openai",
                     "time": utc_now(),
+                    "workflow": workflow_health,
+                    "provider_status": provider_status,
                 }
             )
             return
@@ -821,8 +1414,223 @@ class StudioHandler(BaseHTTPRequestHandler):
                 "provider": provider_name(),
                 "live_generation": provider_name() == "openai",
                 "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+                "provider_status": provider_runtime_status(),
             }
             self._send_json(data)
+            return
+        if path == "/api/sop/bootstrap":
+            try:
+                project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+                payload = get_sop_store().snapshot(project_id)
+                payload["backups"] = list_backups(DATA_DIR / "backups")
+                payload["provider_status"] = provider_runtime_status()
+                self._send_json(payload)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/instructions":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json({"items": get_sop_store().instructions(project_id)})
+            return
+        if path == "/api/style-packs":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            try:
+                self._send_json(
+                    {
+                        "items": get_sop_store().style_pack_versions(
+                            project_id,
+                            status=query.get("status", [None])[0],
+                        )
+                    }
+                )
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/provider-status":
+            self._send_json(provider_runtime_status())
+            return
+        summary_match = re.fullmatch(r"/api/projects/([a-z0-9-]{3,80})/summary", path)
+        if summary_match:
+            try:
+                self._send_json(get_sop_store().summary(summary_match.group(1)))
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/reports/production":
+            try:
+                self._send_json(
+                    get_sop_store().production_report(
+                        query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0],
+                        days=int(query.get("days", ["7"])[0]),
+                    )
+                )
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_REPORT_RANGE", "message": "日报范围无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/poems":
+            try:
+                result = get_sop_store().list_poems(
+                    query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0],
+                    status=query.get("status", [None])[0],
+                    query=query.get("q", [""])[0],
+                    limit=int(query.get("limit", ["100"])[0]),
+                    offset=int(query.get("offset", ["0"])[0]),
+                )
+                self._send_json(result)
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAGINATION", "message": "分页参数无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        poem_detail_match = re.fullmatch(r"/api/poems/([a-z0-9-]{3,80})", path)
+        if poem_detail_match:
+            try:
+                self._send_json(get_sop_store().poem_detail(poem_detail_match.group(1)))
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/requirements":
+            self._send_json(
+                {
+                    "items": get_sop_store().requirements(
+                        query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+                    )
+                }
+            )
+            return
+        if path == "/api/schemas/requirement-card":
+            self._send_json(requirement_schema_document())
+            return
+        if path == "/api/requirement-generation-runs":
+            try:
+                unresolved = query.get("unresolved", [""])[0].lower()
+                self._send_json(
+                    {
+                        "items": get_sop_store().requirement_generation_runs(
+                            query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0],
+                            poem_id=query.get("poem_id", [None])[0],
+                            status=query.get("status", [None])[0],
+                            unresolved_only=unresolved in {"1", "true", "yes"},
+                            limit=int(query.get("limit", ["200"])[0]),
+                        )
+                    }
+                )
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_PAGINATION",
+                            "message": "需求生成运行记录分页参数无效。",
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/directions":
+            self._send_json(
+                {
+                    "items": get_sop_store().directions(
+                        query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+                    )
+                }
+            )
+            return
+        if path == "/api/audit-events":
+            self._send_json(
+                {
+                    "items": get_sop_store().audit_events(
+                        target_type=query.get("target_type", [None])[0],
+                        target_id=query.get("target_id", [None])[0],
+                        limit=int(query.get("limit", ["100"])[0]),
+                    )
+                }
+            )
+            return
+        if path == "/api/batches":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json({"items": get_sop_store().batches(project_id)})
+            return
+        if path == "/api/tasks":
+            try:
+                self._send_json(
+                    get_sop_store().task_page(
+                        project_id=query.get(
+                            "project_id", [SOP_DEFAULT_PROJECT_ID]
+                        )[0],
+                        batch_id=query.get("batch_id", [None])[0],
+                        status=query.get("status", [None])[0],
+                        poem_id=query.get("poem_id", [None])[0],
+                        error_code=query.get("error_code", [None])[0],
+                        q=query.get("q", [""])[0],
+                        limit=int(query.get("limit", ["50"])[0]),
+                        offset=int(query.get("offset", ["0"])[0]),
+                    )
+                )
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAGINATION", "message": "分页参数无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/review-queue":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            include_blocked = query.get("include_blocked", ["false"])[0].lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            self._send_json(
+                get_sop_store().review_queue(
+                    project_id,
+                    include_blocked=include_blocked,
+                )
+            )
+            return
+        if path == "/api/rework-orders":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json({"items": get_sop_store().rework_orders(project_id)})
+            return
+        if path == "/api/final-assets":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {
+                    "items": get_sop_store().final_assets(
+                        project_id,
+                        query=query.get("q", [""])[0],
+                        current_only=query.get("current_only", ["true"])[0].lower()
+                        not in {"0", "false", "no"},
+                        limit=int(query.get("limit", ["500"])[0]),
+                    )
+                }
+            )
+            return
+        if path == "/api/exports":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {
+                    "items": [
+                        present_export_package(package)
+                        for package in get_sop_store().export_packages(project_id)
+                    ]
+                }
+            )
+            return
+        if path == "/api/backups":
+            self._send_json({"items": list_backups(DATA_DIR / "backups")})
             return
         if path == "/api/images":
             self._send_json({"images": list(reversed(STORE.images[-200:]))})
@@ -836,6 +1644,16 @@ class StudioHandler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             self._serve_file(GENERATED_DIR / name)
+            return
+        if path.startswith("/exports/"):
+            export_root = (DATA_DIR / "exports").resolve()
+            candidate = (export_root / path.removeprefix("/exports/")).resolve()
+            try:
+                candidate.relative_to(export_root)
+            except ValueError:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._serve_file(candidate, cache=False)
             return
         if path == "/":
             self._serve_file(PUBLIC_DIR / "index.html", cache=False)
@@ -855,6 +1673,577 @@ class StudioHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         assert STORE is not None
         path = urlparse(self.path).path
+        if path == "/api/instructions":
+            try:
+                body = self._read_json()
+                instruction = get_sop_store().create_instruction_version(
+                    str(body.get("project_id") or SOP_DEFAULT_PROJECT_ID),
+                    name=str(body.get("name") or ""),
+                    content=body.get("content"),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"instruction": instruction}, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        instruction_publish = re.fullmatch(
+            r"/api/instructions/(instruction_[a-f0-9]{32})/publish", path
+        )
+        if instruction_publish:
+            try:
+                body = self._read_json()
+                instruction = get_sop_store().publish_instruction_version(
+                    instruction_publish.group(1), actor=body.get("actor")
+                )
+                self._send_json({"instruction": instruction})
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        instruction_retire = re.fullmatch(
+            r"/api/instructions/(instruction_[a-f0-9]{32})/retire", path
+        )
+        if instruction_retire:
+            try:
+                body = self._read_json()
+                instruction = get_sop_store().retire_instruction_draft(
+                    instruction_retire.group(1),
+                    reason=str(body.get("reason") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"instruction": instruction})
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/style-packs":
+            try:
+                body = self._read_json()
+                style = get_sop_store().create_style_pack_version(
+                    str(body.get("project_id") or SOP_DEFAULT_PROJECT_ID),
+                    style_id=str(body.get("style_id") or ""),
+                    name=str(body.get("name") or ""),
+                    short_name=str(body.get("short_name") or ""),
+                    description=str(body.get("description") or ""),
+                    prompt_fragment=str(body.get("prompt_fragment") or ""),
+                    palette=body.get("palette"),
+                    settings=body.get("settings"),
+                    applicable_topics=body.get("applicable_topics"),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"style": style}, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        style_publish = re.fullmatch(
+            r"/api/style-packs/(stylev_[a-f0-9]{32})/publish", path
+        )
+        if style_publish:
+            try:
+                body = self._read_json()
+                style = get_sop_store().publish_style_pack_version(
+                    style_publish.group(1), actor=body.get("actor")
+                )
+                self._send_json({"style": style})
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/backups":
+            try:
+                body = self._read_json()
+                result = create_backup(
+                    get_sop_store().database_path,
+                    DATA_DIR,
+                    DATA_DIR / "backups",
+                )
+                get_sop_store().record_system_audit(
+                    "backup.created",
+                    "backup",
+                    result["name"],
+                    after=result,
+                    actor=body.get("actor"),
+                )
+                self._send_json({"backup": result}, HTTPStatus.CREATED)
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._send_json(
+                    {
+                        "code": "BACKUP_FAILED",
+                        "message": f"备份失败：{exc}",
+                        "request_id": self.headers.get(
+                            "X-Request-ID", "local-request"
+                        ),
+                    },
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return
+        backup_verify = re.fullmatch(r"/api/backups/(backup-[A-Za-z0-9-]+)/verify", path)
+        if backup_verify:
+            try:
+                body = self._read_json()
+                result = verify_backup(
+                    DATA_DIR / "backups" / backup_verify.group(1)
+                )
+                get_sop_store().record_system_audit(
+                    "backup.verified",
+                    "backup",
+                    result["name"],
+                    after=result,
+                    actor=body.get("actor"),
+                )
+                self._send_json({"backup": result})
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._send_json(
+                    {
+                        "code": "BACKUP_VERIFY_FAILED",
+                        "message": f"备份校验失败：{exc}",
+                        "request_id": self.headers.get(
+                            "X-Request-ID", "local-request"
+                        ),
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        image_workflow_action = re.fullmatch(
+            r"/api/images/([a-f0-9]{32})/(decision|qc-override|rework|finalize)",
+            path,
+        )
+        if image_workflow_action:
+            try:
+                body = self._read_json()
+                image_id = image_workflow_action.group(1)
+                action = image_workflow_action.group(2)
+                if action == "decision":
+                    reason_tags = body.get("reason_tags") or []
+                    if not isinstance(reason_tags, list):
+                        raise WorkflowError(
+                            "INVALID_REASON_TAGS", "reason_tags 必须是数组。"
+                        )
+                    image = get_sop_store().decide_image(
+                        image_id,
+                        str(body.get("decision") or ""),
+                        reason_tags=reason_tags,
+                        note=str(body.get("note") or ""),
+                        actor=body.get("actor"),
+                    )
+                    self._send_json({"image": image})
+                elif action == "qc-override":
+                    image = get_sop_store().override_qc(
+                        image_id,
+                        str(body.get("decision") or ""),
+                        reason=str(body.get("reason") or ""),
+                        actor=body.get("actor"),
+                    )
+                    self._send_json({"image": image})
+                elif action == "rework":
+                    preserve = body.get("preserve") or []
+                    change = body.get("change") or []
+                    avoid = body.get("avoid") or []
+                    if not all(
+                        isinstance(value, list)
+                        for value in (preserve, change, avoid)
+                    ):
+                        raise WorkflowError(
+                            "INVALID_REWORK_FIELDS",
+                            "返工保持项、修改项和禁止项必须是数组。",
+                        )
+                    order = get_sop_store().create_rework_order(
+                        image_id,
+                        preserve=preserve,
+                        change=change,
+                        avoid=avoid,
+                        note=str(body.get("note") or ""),
+                        actor=body.get("actor"),
+                    )
+                    batch = get_sop_store().create_rework_batch(
+                        order["id"],
+                        actor=body.get("actor"),
+                    )
+                    batch = get_sop_store().start_batch(
+                        batch["id"],
+                        actor=body.get("actor"),
+                    )
+                    if batch["status"] != "budget_blocked":
+                        ensure_batch_worker(batch["id"])
+                    self._send_json(
+                        {
+                            "rework_order": get_sop_store().rework_order(order["id"]),
+                            "batch": batch,
+                        },
+                        HTTPStatus.CREATED,
+                    )
+                else:
+                    result = get_sop_store().finalize_image(
+                        image_id,
+                        reviewer_type=str(body.get("reviewer_type") or ""),
+                        decision=str(body.get("decision") or ""),
+                        reason=str(body.get("reason") or ""),
+                        actor=body.get("actor"),
+                    )
+                    self._send_json(result)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_PAYLOAD",
+                            "message": "请求字段格式无效。",
+                            "request_id": self.headers.get(
+                                "X-Request-ID", "local-request"
+                            ),
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path in {"/api/exports/estimate", "/api/exports"}:
+            try:
+                body = self._read_json()
+                poem_ids = body.get("poem_ids")
+                if poem_ids is not None and not isinstance(poem_ids, list):
+                    raise WorkflowError("INVALID_POEM_IDS", "poem_ids 必须是数组。")
+                project_id = str(
+                    body.get("project_id") or SOP_DEFAULT_PROJECT_ID
+                )
+                if path == "/api/exports/estimate":
+                    self._send_json(
+                        get_sop_store().export_estimate(
+                            project_id,
+                            poem_ids=poem_ids,
+                        )
+                    )
+                else:
+                    package = get_sop_store().create_export_package(
+                        project_id,
+                        DATA_DIR / "exports",
+                        poem_ids=poem_ids,
+                        actor=body.get("actor"),
+                    )
+                    self._send_json(
+                        {"package": present_export_package(package)},
+                        HTTPStatus.CREATED,
+                    )
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path in {"/api/batches/estimate", "/api/batches"}:
+            try:
+                body = self._read_json()
+                poem_ids = body.get("poem_ids")
+                direction_ids = body.get("direction_ids")
+                if not isinstance(poem_ids, list):
+                    raise WorkflowError(
+                        "POEM_IDS_REQUIRED", "poem_ids 必须是诗词 ID 数组。"
+                    )
+                if direction_ids is not None and not isinstance(direction_ids, list):
+                    raise WorkflowError(
+                        "INVALID_DIRECTION_IDS",
+                        "direction_ids 必须是方向 ID 数组。",
+                    )
+                style_id = str(body.get("style_id") or "")
+                provider = provider_name()
+                model = (
+                    "demo-renderer"
+                    if provider == "demo"
+                    else os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+                )
+                arguments = {
+                    "project_id": str(
+                        body.get("project_id") or SOP_DEFAULT_PROJECT_ID
+                    ),
+                    "poem_ids": poem_ids,
+                    "direction_ids": direction_ids,
+                    "style_id": style_id,
+                    "aspect_ratio": str(body.get("aspect_ratio") or "portrait"),
+                    "count_per_direction": int(body.get("count_per_direction", 1)),
+                    "provider": provider,
+                    "model": model,
+                    "unit_cost": estimated_unit_cost(provider),
+                }
+                if path == "/api/batches/estimate":
+                    self._send_json(get_sop_store().estimate_batch(**arguments))
+                else:
+                    batch = get_sop_store().create_batch(
+                        **arguments,
+                        name=str(body.get("name") or ""),
+                        priority=int(body.get("priority", 50)),
+                        actor=body.get("actor"),
+                    )
+                    self._send_json({"batch": batch}, HTTPStatus.CREATED)
+            except (WorkflowError, TypeError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_BATCH_SETTINGS",
+                            "message": "批次参数格式无效。",
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        batch_action = re.fullmatch(
+            r"/api/batches/(batch_[a-f0-9]{32})/"
+            r"(start|pause|resume|cancel|retry-failed)",
+            path,
+        )
+        if batch_action:
+            try:
+                body = self._read_json()
+                batch_id = batch_action.group(1)
+                action = batch_action.group(2)
+                actor = body.get("actor")
+                if action in {"start", "resume"}:
+                    pending_batch = get_sop_store().batch(batch_id)
+                    circuit = PROVIDER_CIRCUITS.status(pending_batch["provider"])
+                    if circuit["state"] == "open":
+                        raise WorkflowError(
+                            "PROVIDER_CIRCUIT_OPEN",
+                            "Provider 熔断中，请等待冷却后再恢复批次。",
+                            status=503,
+                        )
+                    batch = get_sop_store().start_batch(batch_id, actor=actor)
+                    if batch["status"] != "budget_blocked":
+                        ensure_batch_worker(batch_id)
+                    if batch["status"] == "budget_blocked":
+                        self._send_json(
+                            {
+                                "code": "BUDGET_BLOCKED",
+                                "message": "批次预计成本超过剩余预算，已阻止启动。",
+                                "batch": batch,
+                            },
+                            HTTPStatus.CONFLICT,
+                        )
+                    else:
+                        self._send_json({"batch": batch}, HTTPStatus.ACCEPTED)
+                elif action == "pause":
+                    self._send_json(
+                        {
+                            "batch": get_sop_store().pause_batch(
+                                batch_id, actor=actor
+                            )
+                        }
+                    )
+                elif action == "cancel":
+                    self._send_json(
+                        {
+                            "batch": get_sop_store().cancel_batch(
+                                batch_id, actor=actor
+                            )
+                        }
+                    )
+                else:
+                    batch = get_sop_store().retry_failed_tasks(
+                        batch_id,
+                        confirm_unknown=bool(body.get("confirm_unknown")),
+                        actor=actor,
+                    )
+                    if batch["status"] == "budget_blocked":
+                        self._send_json(
+                            {
+                                "code": "BUDGET_BLOCKED",
+                                "message": "失败任务重试成本超过剩余预算。",
+                                "batch": batch,
+                            },
+                            HTTPStatus.CONFLICT,
+                        )
+                    else:
+                        ensure_batch_worker(batch_id)
+                        self._send_json({"batch": batch}, HTTPStatus.ACCEPTED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        import_match = re.fullmatch(
+            r"/api/projects/([a-z0-9-]{3,80})/poems/import", path
+        )
+        if import_match:
+            try:
+                body = self._read_json()
+                records = body.get("records")
+                if bool(body.get("commit")):
+                    result = get_sop_store().import_poems(
+                        import_match.group(1),
+                        records,
+                        actor=body.get("actor"),
+                    )
+                    self._send_json(result, HTTPStatus.CREATED)
+                else:
+                    self._send_json(
+                        get_sop_store().preview_poem_import(
+                            import_match.group(1), records
+                        )
+                    )
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        content_approval = re.fullmatch(
+            r"/api/poems/([a-z0-9-]{3,80})/content/approve", path
+        )
+        if content_approval:
+            try:
+                body = self._read_json()
+                result = get_sop_store().approve_content(
+                    content_approval.group(1),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"poem": result})
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/requirements/generate":
+            try:
+                body = self._read_json()
+                result = get_sop_store().generate_requirements(
+                    str(body.get("project_id") or SOP_DEFAULT_PROJECT_ID),
+                    body.get("poem_ids") or [],
+                    preserve_locked=bool(body.get("preserve_locked", True)),
+                    actor=body.get("actor"),
+                )
+                self._send_json(result, HTTPStatus.CREATED)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/requirements/bulk-decision":
+            try:
+                body = self._read_json()
+                result = get_sop_store().bulk_decide_requirements(
+                    body.get("requirement_ids") or [],
+                    str(body.get("decision") or ""),
+                    reason=str(body.get("reason") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json(result)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        requirement_action = re.fullmatch(
+            r"/api/requirements/(req_[a-f0-9]{32})/(approve|reject)", path
+        )
+        if requirement_action:
+            try:
+                body = self._read_json()
+                result = get_sop_store().decide_requirement(
+                    requirement_action.group(1),
+                    requirement_action.group(2),
+                    reason=str(body.get("reason") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"requirement": result})
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/directions/generate":
+            try:
+                body = self._read_json()
+                result = get_sop_store().generate_directions(
+                    str(body.get("project_id") or SOP_DEFAULT_PROJECT_ID),
+                    body.get("poem_ids") or [],
+                    preserve_locked=bool(body.get("preserve_locked", True)),
+                    actor=body.get("actor"),
+                )
+                self._send_json(result, HTTPStatus.CREATED)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        if path == "/api/directions/bulk-decision":
+            try:
+                body = self._read_json()
+                result = get_sop_store().bulk_decide_directions(
+                    body.get("direction_ids") or [],
+                    str(body.get("decision") or ""),
+                    reason=str(body.get("reason") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json(result)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        direction_action = re.fullmatch(
+            r"/api/directions/(dir_[a-f0-9]{32})/(approve|reject)", path
+        )
+        if direction_action:
+            try:
+                body = self._read_json()
+                result = get_sop_store().decide_direction(
+                    direction_action.group(1),
+                    direction_action.group(2),
+                    reason=str(body.get("reason") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"direction": result})
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        direction_mutation = re.fullmatch(
+            r"/api/directions/(dir_[a-f0-9]{32})/(revise|copy|disable)", path
+        )
+        if direction_mutation:
+            try:
+                body = self._read_json()
+                direction_id = direction_mutation.group(1)
+                action = direction_mutation.group(2)
+                if action == "revise":
+                    result = get_sop_store().revise_direction(
+                        direction_id,
+                        body.get("content") or {},
+                        actor=body.get("actor"),
+                    )
+                    status = HTTPStatus.CREATED
+                elif action == "copy":
+                    result = get_sop_store().copy_direction(
+                        direction_id, actor=body.get("actor")
+                    )
+                    status = HTTPStatus.CREATED
+                else:
+                    result = get_sop_store().disable_direction(
+                        direction_id,
+                        reason=str(body.get("reason") or ""),
+                        actor=body.get("actor"),
+                    )
+                    status = HTTPStatus.OK
+                self._send_json({"direction": result}, status)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
         if path == "/api/projects":
             try:
                 body = self._read_json()
@@ -962,6 +2351,54 @@ class StudioHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802
         assert STORE is not None
         path = urlparse(self.path).path
+        budget_match = re.fullmatch(
+            r"/api/projects/([a-z0-9-]{3,80})/budget", path
+        )
+        if budget_match:
+            try:
+                body = self._read_json()
+                if "hard_limit" not in body:
+                    raise WorkflowError(
+                        "BUDGET_REQUIRED", "请填写项目预算硬上限。"
+                    )
+                budget = get_sop_store().set_budget_policy(
+                    budget_match.group(1),
+                    hard_limit=float(body["hard_limit"]),
+                    soft_ratio=float(body.get("soft_ratio", 0.7)),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"budget": budget})
+            except (WorkflowError, TypeError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_BUDGET",
+                            "message": "预算与软提醒比例必须是有效数字。",
+                            "request_id": self.headers.get(
+                                "X-Request-ID", "local-request"
+                            ),
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        requirement_match = re.fullmatch(r"/api/requirements/(req_[a-f0-9]{32})", path)
+        if requirement_match:
+            try:
+                body = self._read_json()
+                changes = body.get("changes")
+                if not isinstance(changes, dict):
+                    raise WorkflowError("CHANGES_REQUIRED", "请提交需要修改的需求字段。")
+                result = get_sop_store().revise_requirement(
+                    requirement_match.group(1),
+                    changes,
+                    actor=body.get("actor"),
+                )
+                self._send_json({"requirement": result}, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
         project_match = re.fullmatch(r"/api/projects/([a-z0-9-]{3,64})", path)
         if project_match:
             try:
@@ -1041,10 +2478,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    global STORE
+    global STORE, SOP_STORE
     args = parse_args()
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     STORE = StudioStore()
+    SOP_STORE = get_sop_store()
     seed_demo_gallery()
     server = ThreadingHTTPServer((args.host, args.port), StudioHandler)
     display_host = "localhost" if args.host in {"127.0.0.1", "0.0.0.0"} else args.host

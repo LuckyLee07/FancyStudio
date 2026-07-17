@@ -1,365 +1,3433 @@
 const state = {
-  poems: [], styles: [], projects: [], images: [], jobs: [], config: null,
-  activeProjectId: null, currentImageId: null, generationMode: "explore",
-  styleFilter: "all", decisionFilter: "all", projectFilter: "active",
-  knownTerminalJobs: new Set(), pollTimer: null,
+  legacy: {
+    poems: [],
+    styles: [],
+    projects: [],
+    images: [],
+    jobs: [],
+    config: {},
+  },
+  sop: {
+    summary: null,
+    poems: [],
+    requirements: [],
+    requirement_generation_failures: [],
+    requirement_schema: null,
+    directions: [],
+    instruction: null,
+    instruction_versions: [],
+    style_packs: [],
+    provider_status: null,
+    production_report: { daily: [], anomalies: [], tasks: {} },
+    batches: [],
+    tasks: [],
+    budget: null,
+    review_queue: { groups: [], summary: {} },
+    rework_orders: [],
+    final_assets: [],
+    export_packages: [],
+    backups: [],
+  },
+  activeView: "overview",
+  selectedPoems: new Set(),
+  selectedRequirements: new Set(),
+  selectedDirections: new Set(),
+  poemQuery: "",
+  poemStatus: "",
+  requirementFilter: "all",
+  importRecords: null,
+  importPreview: null,
+  batchEstimate: null,
+  loading: false,
+  currentImageId: null,
+  reviewSelection: new Set(),
+  reviewShowBlocked: false,
+  assetQuery: "",
+  queueTaskFilter: "",
+  queueBatchFilter: "",
+  queueErrorFilter: "",
+  queueTaskQuery: "",
+};
+
+const roleLabels = {
+  producer: "制片人",
+  content_editor: "内容编辑",
+  art_director: "美术指导",
+  ai_operator: "AI 操作员",
+  system_admin: "系统管理员",
+};
+const storedRole = localStorage.getItem("tang-sop-role");
+const initialRole = roleLabels[storedRole] ? storedRole : "producer";
+const ACTOR = {
+  id: `local-${initialRole}`,
+  role: initialRole,
 };
 
 const viewMeta = {
-  today: { eyebrow: "今日创作台", title: "从方向到成品，每一步都有依据" },
-  projects: { eyebrow: "系列管理", title: "先定义边界，再建立一致性" },
-  poems: { eyebrow: "内容中心", title: "从诗句中提炼视觉命题" },
-  styles: { eyebrow: "视觉资产", title: "把风格变成可复用的基线" },
-  gallery: { eyebrow: "美术评审", title: "做决策，而不只是收藏图片" },
+  overview: ["PRODUCTION CONTROL", "生产总览"],
+  instructions: ["GLOBAL CREATIVE RULES", "AI 指令"],
+  requirements: ["REQUIREMENT REVIEW", "需求板"],
+  directions: ["ART DIRECTION", "方向板"],
+  queue: ["GENERATION QUEUE", "生产队列"],
+  review: ["REVIEW DESK", "审片台"],
+  assets: ["FINAL ASSETS", "成品库"],
+  resources: ["STYLE & SYSTEM", "资源与设置"],
 };
-const statusNames = { queued: "等待生成", running: "生成中", completed: "已完成", failed: "生成失败" };
-const decisionNames = { candidate: "待评审", selected: "已入选", rejected: "已淘汰", final: "可交付" };
-const feedbackLabels = ["增加留白", "缩小主体", "修正服饰", "统一色彩", "降低饱和", "增强诗意", "减少现代感", "简化背景"];
-const qcLabels = {
-  poem_relevance: "诗意与核心意象准确",
-  period_accuracy: "时代、服饰与器物可信",
-  series_consistency: "人物与系列风格一致",
-  visual_integrity: "结构完整，无乱码和畸形",
-  layout_safety: "标题与诗文排版空间安全",
+
+const statusMeta = {
+  imported: ["待校验", "neutral"],
+  content_review: ["内容待审", "warning"],
+  requirement_draft: ["待生成需求", "neutral"],
+  requirement_review: ["需求待审", "warning"],
+  direction_draft: ["待生成方向", "neutral"],
+  direction_review: ["方向待审", "warning"],
+  ready_for_production: ["待排产", "ready"],
+  generating: ["生成中", "running"],
+  candidate_review: ["待审片", "warning"],
+  rework: ["返工中", "danger"],
+  final_review: ["待终审", "warning"],
+  approved: ["终审通过", "success"],
+  exported: ["已交付", "success"],
+  blocked: ["已阻塞", "danger"],
+  paused: ["已暂停", "neutral"],
+  archived: ["已归档", "neutral"],
+};
+
+const requirementStatusMeta = {
+  draft: ["草稿", "neutral"],
+  in_review: ["待审核", "warning"],
+  approved: ["已通过", "success"],
+  rejected: ["已退回", "danger"],
+  disabled: ["已停用", "neutral"],
+};
+
+const directionTypeMeta = {
+  narrative: ["叙事型", "叙"],
+  atmospheric: ["意境型", "境"],
+  symbolic: ["象征型", "象"],
+};
+
+const jobStatusMeta = {
+  queued: ["排队中", "neutral"],
+  running: ["生成中", "running"],
+  completed: ["已完成", "success"],
+  failed: ["失败", "danger"],
+};
+
+const batchStatusMeta = {
+  draft: ["草稿", "neutral"],
+  queued: ["排队中", "ready"],
+  running: ["运行中", "running"],
+  paused: ["已暂停", "warning"],
+  completed: ["已完成", "success"],
+  partially_failed: ["部分失败", "danger"],
+  cancelled: ["已取消", "neutral"],
+  budget_blocked: ["预算阻塞", "danger"],
+};
+
+const taskStatusMeta = {
+  pending: ["待启动", "neutral"],
+  ready: ["待执行", "ready"],
+  running: ["执行中", "running"],
+  succeeded: ["已成功", "success"],
+  failed: ["失败", "danger"],
+  retry_waiting: ["等待重试", "warning"],
+  cancelled: ["已取消", "neutral"],
+  blocked: ["需核对", "danger"],
+};
+
+const productionImageStatusMeta = {
+  pending_qc: ["等待 QC", "warning"],
+  review_ready: ["待审片", "ready"],
+  qc_blocked: ["QC 隔离", "danger"],
+  needs_manual_qc: ["需人工 QC", "warning"],
+  selected: ["已入选", "success"],
+  rejected: ["已淘汰", "neutral"],
+  final_candidate: ["终审候选", "success"],
 };
 
 function escapeHtml(value) {
-  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
+
+function formatDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function asLines(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item).trim()).filter(Boolean)
+    : String(value || "")
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+  if (!response.ok) {
+    const error = new Error(payload.message || payload.error || `请求失败（${response.status}）`);
+    error.code = payload.code || "REQUEST_FAILED";
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
-function getPoem(id) { return state.poems.find((item) => item.id === id); }
-function getStyle(id) { return state.styles.find((item) => item.id === id); }
-function getProject(id) { return state.projects.find((item) => item.id === id); }
-function getActiveProject() { return getProject(state.activeProjectId) || state.projects[0]; }
-function activeImages() { return state.images.filter((item) => item.project_id === getActiveProject()?.id && !item.hidden); }
-function formatDate(value) {
-  const date = value ? new Date(value) : new Date();
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+
+function setSyncState(kind, copy) {
+  const element = document.querySelector("#sync-state");
+  element.className = `sync-state is-${kind}`;
+  element.querySelector("strong").textContent = copy;
 }
-function showToast(message, type = "success") {
+
+function showToast(message, kind = "success") {
+  const region = document.querySelector("#toast-region");
   const toast = document.createElement("div");
-  toast.className = `toast${type === "error" ? " is-error" : ""}`;
+  toast.className = `toast toast-${kind}`;
   toast.textContent = message;
-  document.querySelector("#toast-region").append(toast);
-  window.setTimeout(() => { toast.classList.add("is-leaving"); window.setTimeout(() => toast.remove(), 200); }, 3200);
+  region.append(toast);
+  requestAnimationFrame(() => toast.classList.add("is-visible"));
+  setTimeout(() => {
+    toast.classList.remove("is-visible");
+    setTimeout(() => toast.remove(), 200);
+  }, 3600);
 }
-function projectMetrics(project) {
-  const images = state.images.filter((item) => item.project_id === project.id && !item.hidden);
-  const finals = images.filter((item) => item.decision === "final");
+
+async function loadData({ quiet = false } = {}) {
+  if (state.loading) return;
+  state.loading = true;
+  if (!quiet) setSyncState("loading", "正在同步");
+  try {
+    const [legacy, sop] = await Promise.all([
+      api("/api/bootstrap"),
+      api("/api/sop/bootstrap"),
+    ]);
+    state.legacy = legacy;
+    state.sop = sop;
+    pruneSelection();
+    renderAll();
+    setSyncState("ready", `已同步 · ${formatDate(new Date().toISOString())}`);
+  } catch (error) {
+    console.error(error);
+    setSyncState("error", "同步失败");
+    showToast(error.message, "error");
+  } finally {
+    state.loading = false;
+  }
+}
+
+async function refreshSop(successMessage = "") {
+  try {
+    state.sop = await api("/api/sop/bootstrap");
+    pruneSelection();
+    renderAll();
+    if (
+      state.queueTaskFilter ||
+      state.queueBatchFilter ||
+      state.queueErrorFilter ||
+      state.queueTaskQuery
+    ) {
+      await refreshTaskPage({ offset: 0, quiet: true });
+    }
+    setSyncState("ready", `已同步 · ${formatDate(new Date().toISOString())}`);
+    if (successMessage) showToast(successMessage);
+  } catch (error) {
+    console.error(error);
+    showToast(error.message, "error");
+  }
+}
+
+async function refreshTaskPage({ offset = 0, quiet = false } = {}) {
+  const params = new URLSearchParams({ limit: "50", offset: String(Math.max(0, offset)) });
+  if (state.queueTaskFilter) params.set("status", state.queueTaskFilter);
+  if (state.queueBatchFilter) params.set("batch_id", state.queueBatchFilter);
+  if (state.queueErrorFilter) params.set("error_code", state.queueErrorFilter);
+  if (state.queueTaskQuery) params.set("q", state.queueTaskQuery);
+  try {
+    state.sop.task_page = await api(`/api/tasks?${params.toString()}`);
+    renderQueue();
+  } catch (error) {
+    if (!quiet) showToast(error.message, "error");
+  }
+}
+
+function pruneSelection() {
+  const valid = new Set(state.sop.poems.map((poem) => poem.id));
+  for (const poemId of state.selectedPoems) {
+    if (!valid.has(poemId)) state.selectedPoems.delete(poemId);
+  }
+  const validRequirements = new Set(
+    state.sop.requirements
+      .filter((item) => item.status === "in_review")
+      .map((item) => item.id),
+  );
+  for (const requirementId of state.selectedRequirements) {
+    if (!validRequirements.has(requirementId)) {
+      state.selectedRequirements.delete(requirementId);
+    }
+  }
+  const validDirections = new Set(
+    state.sop.directions
+      .filter((item) => item.status === "in_review")
+      .map((item) => item.id),
+  );
+  for (const directionId of state.selectedDirections) {
+    if (!validDirections.has(directionId)) {
+      state.selectedDirections.delete(directionId);
+    }
+  }
+  const validImages = new Set(
+    (state.sop.review_queue?.groups || []).flatMap((group) =>
+      group.candidates.map((image) => image.id),
+    ),
+  );
+  for (const imageId of state.reviewSelection) {
+    if (!validImages.has(imageId)) state.reviewSelection.delete(imageId);
+  }
+}
+
+function project() {
+  return state.sop.summary?.project || {};
+}
+
+function poemById(poemId) {
+  return state.sop.poems.find((poem) => poem.id === poemId);
+}
+
+function requirementById(requirementId) {
+  return state.sop.requirements.find((item) => item.id === requirementId);
+}
+
+function directionsForPoem(poemId) {
+  return state.sop.directions.filter((item) => item.poem_id === poemId);
+}
+
+function directionById(directionId) {
+  return state.sop.directions.find((item) => item.id === directionId);
+}
+
+function productionImages() {
+  return (state.sop.review_queue?.groups || []).flatMap(
+    (group) => group.candidates || [],
+  );
+}
+
+function productionImageById(imageId) {
+  return productionImages().find((image) => image.id === imageId);
+}
+
+function publishedStylePacks() {
+  return (state.sop.style_packs || []).filter((style) => style.status === "published");
+}
+
+function statusBadge(status, map = statusMeta) {
+  const [label, tone] = map[status] || [status || "未知", "neutral"];
+  return `<span class="status-badge tone-${tone}">${escapeHtml(label)}</span>`;
+}
+
+function visiblePoems() {
+  const query = state.poemQuery.trim().toLowerCase();
+  return state.sop.poems.filter((poem) => {
+    if (state.poemStatus && poem.status !== state.poemStatus) return false;
+    if (!query) return true;
+    const haystack = [
+      poem.title,
+      poem.author,
+      poem.theme,
+      poem.mood,
+      ...(poem.imagery || []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function renderChrome() {
+  const summary = state.sop.summary;
+  if (!summary) return;
+  const completion = summary.completion_percent || 0;
+  document.querySelector("#sidebar-project-name").textContent = summary.project.name;
+  document.querySelector("#sidebar-progress-bar").style.width = `${completion}%`;
+  document.querySelector("#sidebar-progress-copy").textContent =
+    `${summary.total_poems} 首 · ${completion}% 进入终审或交付`;
+  document.querySelector("#app-version").textContent = state.legacy.config.version || "0.3";
+  document.querySelector("#current-role").value = ACTOR.role;
+
+  const providerStatus = state.sop.provider_status || state.legacy.config.provider_status || {};
+  const provider = providerStatus.provider || state.legacy.config.provider || "demo";
+  const providerCard = document.querySelector("#provider-card");
+  providerCard.classList.toggle("is-live", provider === "openai");
+  document.querySelector("#provider-label").textContent =
+    provider === "openai"
+      ? `${providerStatus.model || state.legacy.config.model} · ${
+          providerStatus.configured ? "已配置" : "待配置"
+        }`
+      : "本地演示引擎";
+
+  document.querySelector("#nav-requirement-count").textContent =
+    summary.todos.requirement_review || 0;
+  document.querySelector("#nav-direction-count").textContent =
+    summary.todos.direction_review || 0;
+  document.querySelector("#nav-job-count").textContent = state.sop.batches.filter((batch) =>
+    ["queued", "running", "paused", "budget_blocked"].includes(batch.status),
+  ).length;
+  document.querySelector("#nav-review-count").textContent =
+    state.sop.review_queue?.summary?.review_ready || 0;
+}
+
+function applyRoleVisibility() {
+  document.body.dataset.actorRole = ACTOR.role;
+  document.querySelectorAll("[data-role-allow]").forEach((element) => {
+    const allowed = element.dataset.roleAllow.split(",");
+    element.hidden = !allowed.includes(ACTOR.role);
+  });
+}
+
+function renderOverview() {
+  const summary = state.sop.summary;
+  if (!summary) return;
+  const completed =
+    (summary.status_counts.approved || 0) + (summary.status_counts.exported || 0);
+  document.querySelector("#command-project-name").textContent = summary.project.name;
+  document.querySelector("#command-progress-value").textContent =
+    `${summary.completion_percent}%`;
+  document.querySelector("#command-progress-bar").style.width =
+    `${summary.completion_percent}%`;
+  document.querySelector("#command-progress-meta").textContent =
+    `${completed} / ${summary.total_poems} 首进入终审或交付`;
+
+  const candidateCount = state.sop.review_queue?.summary?.review_ready || 0;
+  const finalCount = (state.sop.final_assets || []).filter(
+    (asset) => Boolean(asset.is_current),
+  ).length;
+  const activeTaskCount = state.sop.tasks.filter((task) =>
+    ["pending", "ready", "running", "retry_waiting"].includes(task.status),
+  ).length;
+  const recentTasks = state.sop.tasks.filter((task) =>
+    ["succeeded", "failed", "blocked"].includes(task.status),
+  );
+  const successRate = recentTasks.length
+    ? Math.round(
+        (recentTasks.filter((task) => task.status === "succeeded").length /
+          recentTasks.length) *
+          100,
+      )
+    : 0;
+  const budget = state.sop.budget || {};
+  const metrics = [
+    ["项目诗词", summary.total_poems, "已进入生产项目", "neutral"],
+    [
+      "待处理审批",
+      (summary.todos.requirement_review || 0) + (summary.todos.direction_review || 0),
+      "需求与方向审核",
+      "warning",
+    ],
+    ["待排产", summary.todos.ready_for_production || 0, "已通过方向门禁", "ready"],
+    ["队列积压", activeTaskCount, "待执行与运行任务", activeTaskCount ? "ready" : "neutral"],
+    ["任务成功率", `${successRate}%`, `${recentTasks.length} 个已收敛任务`, successRate >= 90 ? "success" : "warning"],
+    [
+      "预算余额",
+      Number(budget.remaining || 0).toFixed(2),
+      `${Number(budget.spent || 0).toFixed(2)} / ${Number(
+        budget.hard_limit || 0,
+      ).toFixed(2)} ${budget.currency || "USD"} 已用`,
+      budget.soft_warning ? "warning" : "success",
+    ],
+  ];
+  document.querySelector("#metric-grid").innerHTML = metrics
+    .map(
+      ([label, value, note, tone]) => `
+        <article class="metric-card tone-card-${tone}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${value}</strong>
+          <small>${escapeHtml(note)}</small>
+        </article>`,
+    )
+    .join("");
+
+  const maxCount = Math.max(1, ...summary.stages.map((stage) => stage.count));
+  document.querySelector("#pipeline-grid").innerHTML = summary.stages
+    .filter((stage) => stage.key !== "blocked")
+    .map(
+      (stage, index) => `
+        <button class="pipeline-step" type="button" data-stage-key="${stage.key}">
+          <span class="pipeline-order">${String(index + 1).padStart(2, "0")}</span>
+          <strong>${stage.count}</strong>
+          <small>${escapeHtml(stage.label)}</small>
+          <span class="pipeline-bar"><i style="width:${Math.max(
+            stage.count ? 10 : 0,
+            Math.round((stage.count / maxCount) * 100),
+          )}%"></i></span>
+        </button>`,
+    )
+    .join("");
+
+  const todos = [
+    {
+      label: "审核 AI 需求",
+      count: summary.todos.requirement_review || 0,
+      note: "确认诗意、必须项和历史风险",
+      view: "requirements",
+      tone: "yellow",
+    },
+    {
+      label: "审核画面方向",
+      count: summary.todos.direction_review || 0,
+      note: "每首至少批准一个方向",
+      view: "directions",
+      tone: "blue",
+    },
+    {
+      label: "审核候选图片",
+      count: candidateCount,
+      note: "处理收藏、淘汰与终审候选",
+      view: "review",
+      tone: "blue",
+    },
+    {
+      label: "处理失败任务",
+      count: state.sop.tasks.filter((task) =>
+        ["failed", "blocked"].includes(task.status),
+      ).length,
+      note: "核对结果未知项或重试可恢复错误",
+      view: "queue",
+      tone: "red",
+    },
+    {
+      label: "创建生产批次",
+      count: summary.todos.ready_for_production || 0,
+      note: "通过门禁，等待排产",
+      view: "queue",
+      tone: "green",
+    },
+    {
+      label: "待终审与成品",
+      count: (summary.todos.final_review || 0) + finalCount,
+      note: "完成质检后锁定交付版本",
+      view: "assets",
+      tone: "green",
+    },
+  ];
+  document.querySelector("#todo-list").innerHTML = todos
+    .map(
+      (todo) => `
+        <button class="todo-item tone-${todo.tone}" type="button" data-switch-view="${todo.view}">
+          <span class="todo-count">${todo.count}</span>
+          <span><strong>${escapeHtml(todo.label)}</strong><small>${escapeHtml(todo.note)}</small></span>
+          <i>→</i>
+        </button>`,
+    )
+    .join("");
+}
+
+function renderProductionReport() {
+  const report = state.sop.production_report || { daily: [], anomalies: [], tasks: {} };
+  document.querySelector("#report-period").textContent = `最近 ${report.days || 7} 天`;
+  const reportMetrics = [
+    ["生成图片", report.generated || 0],
+    ["人工决策", report.reviewed || 0],
+    ["返工单", report.reworks || 0],
+    ["终审成品", report.finalized || 0],
+    ["任务成功率", `${Number(report.tasks?.success_rate || 0).toFixed(1)}%`],
+    ["实际成本", Number(report.actual_cost || 0).toFixed(2)],
+  ];
+  document.querySelector("#report-metrics").innerHTML = reportMetrics
+    .map(
+      ([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${value}</strong></span>`,
+    )
+    .join("");
+
+  const daily = report.daily || [];
+  const maxDaily = Math.max(
+    1,
+    ...daily.map((item) => Math.max(item.generated, item.succeeded, item.finalized)),
+  );
+  document.querySelector("#report-trend").innerHTML = daily.length
+    ? daily
+        .map(
+          (item) => `<article title="${item.date} · 生成 ${item.generated} · 成功 ${item.succeeded} · 终审 ${item.finalized}">
+            <div>
+              <i class="is-generated" style="height:${Math.round((item.generated / maxDaily) * 100)}%"></i>
+              <i class="is-succeeded" style="height:${Math.round((item.succeeded / maxDaily) * 100)}%"></i>
+              <i class="is-finalized" style="height:${Math.round((item.finalized / maxDaily) * 100)}%"></i>
+            </div>
+            <span>${escapeHtml(item.date.slice(5))}</span>
+          </article>`,
+        )
+        .join("")
+    : '<span class="muted-value">暂无生产数据</span>';
+
+  const anomalies = report.anomalies || [];
+  document.querySelector("#anomaly-total").textContent = `${report.anomaly_count || 0} 项`;
+  document.querySelector("#anomaly-list").innerHTML = anomalies.length
+    ? anomalies
+        .map(
+          (item) => `<button class="anomaly-item severity-${item.severity}" type="button" data-anomaly-view="${item.view}" data-anomaly-filter="${item.filter}">
+            <span>${item.count}</span>
+            <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(
+              item.suggested_action,
+            )}</small></div><i>→</i>
+          </button>`,
+        )
+        .join("")
+    : '<div class="empty-state compact"><strong>当前没有生产异常</strong><p>失败、阻塞、QC 隔离和预算停机会集中显示在这里。</p></div>';
+}
+
+function nextAction(poem) {
+  if (["imported", "content_review"].includes(poem.status)) {
+    return ["批准内容", "approve-content"];
+  }
+  if (poem.status === "requirement_draft") {
+    return ["生成需求", "generate-requirement"];
+  }
+  if (poem.status === "requirement_review") {
+    return ["审核需求", "open-requirement"];
+  }
+  if (poem.status === "direction_draft") {
+    return ["生成方向", "generate-direction"];
+  }
+  if (poem.status === "direction_review") {
+    return ["审核方向", "open-directions"];
+  }
+  if (poem.status === "ready_for_production") {
+    return ["进入排产", "open-queue"];
+  }
+  if (["candidate_review", "rework", "final_review"].includes(poem.status)) {
+    return ["进入审片", "open-review"];
+  }
+  if (poem.status === "blocked") {
+    return ["查看阻塞", "open-overview"];
+  }
+  return ["查看详情", "open-requirement"];
+}
+
+function renderPoemTable() {
+  const poems = visiblePoems();
+  const body = document.querySelector("#poem-table-body");
+  document.querySelector("#poem-table-empty").hidden = poems.length > 0;
+  body.innerHTML = poems
+    .map((poem) => {
+      const action = nextAction(poem);
+      const requirement = poem.requirement;
+      const checked = state.selectedPoems.has(poem.id);
+      return `
+        <tr class="${checked ? "is-selected" : ""}">
+          <td class="checkbox-cell">
+            <input type="checkbox" data-select-poem="${poem.id}" ${
+              checked ? "checked" : ""
+            } aria-label="选择${escapeHtml(poem.title)}" />
+          </td>
+          <td>
+            <div class="poem-cell">
+              <button class="poem-detail-link" type="button" data-open-poem-detail="${poem.id}">${escapeHtml(poem.title)}</button>
+              <span>${escapeHtml(poem.dynasty)} · ${escapeHtml(poem.author)}</span>
+            </div>
+          </td>
+          <td>
+            <div class="topic-cell">
+              <span>${escapeHtml(poem.theme || "未分类")}</span>
+              <small>${escapeHtml(poem.mood || "待补情绪")}</small>
+            </div>
+          </td>
+          <td>${statusBadge(poem.status)}</td>
+          <td>
+            ${
+              requirement
+                ? `<button class="inline-version" type="button" data-poem-action="open-requirement" data-poem-id="${poem.id}">v${requirement.version} · ${
+                    requirementStatusMeta[requirement.status]?.[0] || requirement.status
+                  }</button>`
+                : '<span class="muted-value">尚未生成</span>'
+            }
+          </td>
+          <td>
+            <span class="direction-count">
+              <strong>${poem.approved_direction_count || 0}</strong> / ${
+                poem.direction_count || 0
+              } 通过
+            </span>
+          </td>
+          <td>
+            <button class="row-action" type="button" data-poem-action="${
+              action[1]
+            }" data-poem-id="${poem.id}">${action[0]} →</button>
+          </td>
+        </tr>`;
+    })
+    .join("");
+
+  const visibleIds = poems.map((poem) => poem.id);
+  const allChecked =
+    visibleIds.length > 0 && visibleIds.every((id) => state.selectedPoems.has(id));
+  const someChecked = visibleIds.some((id) => state.selectedPoems.has(id));
+  const selectAll = document.querySelector("#select-all-poems");
+  selectAll.checked = allChecked;
+  selectAll.indeterminate = someChecked && !allChecked;
+  document.querySelector("#selection-count").textContent = state.selectedPoems.size
+    ? `已选择 ${state.selectedPoems.size} 首`
+    : "未选择";
+}
+
+function renderRequirementTabs() {
+  const failurePoems = new Set(
+    (state.sop.requirement_generation_failures || []).map((item) => item.poem_id),
+  );
+  const counts = {
+    all: state.sop.requirements.length,
+    in_review: state.sop.requirements.filter((item) => item.status === "in_review").length,
+    approved: state.sop.requirements.filter((item) => item.status === "approved").length,
+    rejected: state.sop.requirements.filter((item) => item.status === "rejected").length,
+    missing: state.sop.poems.filter((poem) => !poem.requirement).length,
+    failed: failurePoems.size,
+  };
+  const tabs = [
+    ["all", "全部"],
+    ["in_review", "待审核"],
+    ["approved", "已通过"],
+    ["rejected", "已退回"],
+    ["failed", "生成异常"],
+    ["missing", "待生成"],
+  ];
+  document.querySelector("#requirement-tabs").innerHTML = tabs
+    .map(
+      ([key, label]) => `
+        <button class="${state.requirementFilter === key ? "is-active" : ""}" type="button" data-requirement-filter="${key}">
+          ${label}<span>${counts[key]}</span>
+        </button>`,
+    )
+    .join("");
+}
+
+function requirementCard(requirement) {
+  const content = requirement.content || {};
+  const evidence = (content.evidence || [])[0];
+  const failure = requirementFailureForPoem(requirement.poem_id);
+  const confidenceEntries = Object.entries(content.confidence || {});
+  const lowConfidenceCount = confidenceEntries.filter(
+    ([, item]) => item?.level === "low" || item?.requires_review,
+  ).length;
+  return `
+    <article class="requirement-card tone-border-${
+      requirementStatusMeta[requirement.status]?.[1] || "neutral"
+    }">
+      <header>
+        <div>
+          <span>${escapeHtml(requirement.theme || "待分类")} · v${requirement.version}</span>
+          <h3>${escapeHtml(requirement.poem_title)}</h3>
+          <small>${escapeHtml(requirement.author)}</small>
+        </div>
+        ${statusBadge(requirement.status, requirementStatusMeta)}
+      </header>
+      <div class="requirement-thesis">
+        <span>画面命题</span>
+        <p>${escapeHtml(content.composition || "等待编辑补充画面构图")}</p>
+      </div>
+      <div class="token-block">
+        <span>核心意象</span>
+        <div>${(content.core_imagery || [])
+          .slice(0, 5)
+          .map((item) => `<i>${escapeHtml(item)}</i>`)
+          .join("")}</div>
+      </div>
+      <div class="constraint-grid">
+        <div><span>必须出现</span><strong>${(content.must_have || []).length}</strong></div>
+        <div><span>禁止出现</span><strong>${(content.avoid || []).length}</strong></div>
+        <div><span>风险项</span><strong>${(content.historical_risks || []).length}</strong></div>
+        <div><span>锁定字段</span><strong>${(content.locked_fields || []).length}</strong></div>
+        <div><span>待人工确认</span><strong>${lowConfidenceCount}</strong></div>
+      </div>
+      <p class="requirement-contract-line">${escapeHtml(
+        requirement.schema_version || state.sop.requirement_schema?.schema_version || "legacy",
+      )} · ${requirement.cache_hit ? "版本缓存命中" : "本次生成"} · ContentVersion ${escapeHtml(
+        requirement.content_version_id || "未记录",
+      )}</p>
+      ${
+        evidence
+          ? `<p class="evidence-line">依据：${escapeHtml(evidence.quote)}</p>`
+          : ""
+      }
+      ${
+        failure
+          ? `<p class="generation-error-note"><strong>${escapeHtml(failure.error_code)}</strong>${escapeHtml(
+              failure.error_message || "需求生成失败",
+            )}<small>自动修复 ${failure.repair_attempts || 0}/1 次 · ${formatDate(failure.completed_at)}</small></p>`
+          : ""
+      }
+      ${
+        requirement.rejection_reason
+          ? `<p class="rejection-note">退回原因：${escapeHtml(
+              requirement.rejection_reason,
+            )}</p>`
+          : ""
+      }
+      <footer>
+        <div data-role-allow="content_editor,producer,system_admin">
+          ${
+            requirement.status === "in_review"
+              ? `<label class="select-card"><input type="checkbox" data-select-requirement="${requirement.id}" ${state.selectedRequirements.has(requirement.id) ? "checked" : ""} /><span>批量</span></label>`
+              : ""
+          }
+          <button class="card-link" type="button" data-requirement-action="edit" data-requirement-id="${requirement.id}">编辑详情</button>
+          <button class="card-link" type="button" data-regenerate-requirement="${requirement.poem_id}">重算未锁字段</button>
+        </div>
+        <div>
+          ${
+            requirement.status === "in_review"
+              ? `<div data-role-allow="content_editor,producer,system_admin"><button class="danger-button" type="button" data-requirement-action="reject" data-requirement-id="${requirement.id}">退回</button>
+                 <button class="approve-button" type="button" data-requirement-action="approve" data-requirement-id="${requirement.id}">通过需求</button></div>`
+              : requirement.status === "approved"
+                ? `<div data-role-allow="art_director,producer,system_admin"><button class="approve-button" type="button" data-poem-action="generate-direction" data-poem-id="${requirement.poem_id}">生成三方向</button></div>`
+                : ""
+          }
+        </div>
+      </footer>
+    </article>`;
+}
+
+function requirementFailureForPoem(poemId) {
+  return (state.sop.requirement_generation_failures || []).find(
+    (item) => item.poem_id === poemId,
+  );
+}
+
+function missingRequirementCard(poem) {
+  const failure = requirementFailureForPoem(poem.id);
+  const firstIssue = failure?.validation?.final_issues?.[0];
+  return `
+    <article class="requirement-card is-missing ${failure ? "tone-border-danger" : ""}">
+      <header>
+        <div>
+          <span>${escapeHtml(poem.theme || "待分类")}</span>
+          <h3>${escapeHtml(poem.title)}</h3>
+          <small>${escapeHtml(poem.author)}</small>
+        </div>
+        ${failure ? '<span class="status-badge tone-danger">生成异常</span>' : statusBadge("draft", requirementStatusMeta)}
+      </header>
+      <div class="missing-copy">
+        <strong>${failure ? escapeHtml(failure.error_code || "需求生成异常") : "等待生成结构化需求"}</strong>
+        <p>${
+          failure
+            ? escapeHtml(firstIssue?.message || failure.error_message || "输出未通过 RequirementCard Schema。")
+            : "系统将分析诗意、意象、时空、必须项、禁用项和历史风险。"
+        }</p>
+        ${
+          failure
+            ? `<small class="generation-failure-meta">${escapeHtml(failure.schema_version)} · 自动修复 ${failure.repair_attempts || 0}/1 次 · ${formatDate(failure.completed_at)}</small>`
+            : ""
+        }
+      </div>
+      <footer data-role-allow="content_editor,producer,system_admin">
+        <label class="select-card">
+          <input type="checkbox" data-select-poem="${poem.id}" ${
+            state.selectedPoems.has(poem.id) ? "checked" : ""
+          } />
+          <span>选择</span>
+        </label>
+        <button class="approve-button" type="button" data-poem-action="generate-requirement" data-poem-id="${
+          poem.id
+        }">${failure ? "↻ 修正后重试" : "✦ 生成需求"}</button>
+      </footer>
+    </article>`;
+}
+
+function renderRequirements() {
+  renderRequirementTabs();
+  let cards = [];
+  if (state.requirementFilter === "failed") {
+    const poemIds = [
+      ...new Set(
+        (state.sop.requirement_generation_failures || []).map((item) => item.poem_id),
+      ),
+    ];
+    cards = poemIds
+      .map((poemId) => {
+        const requirement = state.sop.requirements.find((item) => item.poem_id === poemId);
+        const poem = state.sop.poems.find((item) => item.id === poemId);
+        return requirement ? requirementCard(requirement) : poem ? missingRequirementCard(poem) : "";
+      })
+      .filter(Boolean);
+  } else if (state.requirementFilter === "missing") {
+    cards = state.sop.poems
+      .filter((poem) => !poem.requirement)
+      .map(missingRequirementCard);
+  } else {
+    cards = state.sop.requirements
+      .filter(
+        (item) =>
+          state.requirementFilter === "all" ||
+          item.status === state.requirementFilter,
+      )
+      .map(requirementCard);
+    if (state.requirementFilter === "all") {
+      cards.push(
+        ...state.sop.poems
+          .filter((poem) => !poem.requirement)
+          .slice(0, 12)
+          .map(missingRequirementCard),
+      );
+    }
+  }
+  document.querySelector("#requirement-grid").innerHTML = cards.join("");
+  document.querySelector("#requirement-selection-count").textContent =
+    state.selectedRequirements.size
+      ? `已选择 ${state.selectedRequirements.size} 条待审核需求`
+      : "未选择待审核项";
+  document.querySelector("#bulk-approve-requirements").disabled =
+    state.selectedRequirements.size === 0;
+  document.querySelector("#bulk-reject-requirements").disabled =
+    state.selectedRequirements.size === 0;
+  const empty = document.querySelector("#requirement-empty");
+  empty.hidden = cards.length > 0;
+  empty.innerHTML = "<strong>当前分组没有需求卡</strong><p>调整筛选，或选择诗词生成新需求。</p>";
+  applyRoleVisibility();
+}
+
+function directionCard(direction) {
+  const content = direction.content || {};
+  const [typeName, typeMark] = directionTypeMeta[direction.type] || [
+    direction.type,
+    "策",
+  ];
+  return `
+    <article class="direction-card status-${direction.status}">
+      <header>
+        <span class="direction-mark">${typeMark}</span>
+        <div><small>${escapeHtml(typeName)} · v${direction.version}</small><h4>${escapeHtml(
+          content.title || typeName,
+        )}</h4></div>
+        ${statusBadge(direction.status, requirementStatusMeta)}
+      </header>
+      <p class="direction-subject">${escapeHtml(content.subject || "")}</p>
+      <dl>
+        <div><dt>景别</dt><dd>${escapeHtml(content.shot || "—")}</dd></div>
+        <div><dt>主体层</dt><dd>${escapeHtml(content.midground || "—")}</dd></div>
+        <div><dt>光线</dt><dd>${escapeHtml(content.lighting || "—")}</dd></div>
+        <div><dt>留白</dt><dd>${escapeHtml(content.whitespace || "—")}</dd></div>
+      </dl>
+      <div class="direction-preserve">
+        <span>保持项</span>
+        ${(content.preserve || [])
+          .slice(0, 3)
+          .map((item) => `<i>${escapeHtml(item)}</i>`)
+          .join("")}
+      </div>
+      ${
+        direction.rejection_reason
+          ? `<p class="rejection-note">退回原因：${escapeHtml(
+              direction.rejection_reason,
+            )}</p>`
+          : ""
+      }
+      <footer>
+        <div data-role-allow="art_director,producer,system_admin">
+          ${
+            direction.status === "in_review"
+              ? `<label class="select-card"><input type="checkbox" data-select-direction="${direction.id}" ${state.selectedDirections.has(direction.id) ? "checked" : ""} /><span>批量</span></label>`
+              : ""
+          }
+          ${direction.status !== "disabled" ? `<button class="card-link" type="button" data-edit-direction="${direction.id}">编辑</button>` : ""}
+          <button class="card-link" type="button" data-copy-direction="${direction.id}">复制新版本</button>
+          ${direction.status !== "disabled" ? `<button class="card-link danger-link" type="button" data-disable-direction="${direction.id}">停用</button>` : ""}
+        </div>
+        <div data-role-allow="art_director,producer,system_admin">${
+          direction.status === "in_review"
+            ? `<button class="danger-button" type="button" data-direction-action="reject" data-direction-id="${direction.id}">退回</button>
+               <button class="approve-button" type="button" data-direction-action="approve" data-direction-id="${direction.id}">批准方向</button>`
+            : direction.status === "approved"
+              ? `<span class="approved-copy">✓ 已进入排产门禁</span>`
+              : `<span class="muted-value">${direction.status === "disabled" ? "已从新排产中移除" : "等待重新策划"}</span>`
+        }</div>
+      </footer>
+    </article>`;
+}
+
+function renderDirections() {
+  const poems = state.sop.poems.filter(
+    (poem) =>
+      poem.direction_count > 0 ||
+      ["direction_draft", "direction_review", "ready_for_production"].includes(
+        poem.status,
+      ),
+  );
+  const groups = poems.map((poem) => {
+    const directions = directionsForPoem(poem.id);
+    return `
+      <section class="direction-group">
+        <header class="direction-group-head">
+          <div>
+            <span>${escapeHtml(poem.theme || "未分类")} · ${escapeHtml(poem.author)}</span>
+            <h3>${escapeHtml(poem.title)}</h3>
+          </div>
+          <div>
+            ${statusBadge(poem.status)}
+            ${
+              directions.length
+                ? `<button class="card-link" type="button" data-role-allow="art_director,producer,system_admin" data-poem-action="generate-direction" data-poem-id="${poem.id}">重新生成三方向</button>`
+                : `<button class="approve-button" type="button" data-role-allow="art_director,producer,system_admin" data-poem-action="generate-direction" data-poem-id="${poem.id}">✦ 生成三方向</button>`
+            }
+          </div>
+        </header>
+        ${
+          directions.length
+            ? `<div class="direction-row">${directions
+                .map(directionCard)
+                .join("")}</div>`
+            : '<div class="direction-missing">需求已通过，等待生成叙事、意境、象征三个画面方向。</div>'
+        }
+      </section>`;
+  });
+  document.querySelector("#direction-board").innerHTML = groups.join("");
+  const empty = document.querySelector("#direction-empty");
+  empty.hidden = groups.length > 0;
+  empty.innerHTML =
+    "<strong>还没有可策划的诗词</strong><p>先在需求板完成需求卡审批。</p>";
+  document.querySelector("#direction-selection-count").textContent =
+    state.selectedDirections.size
+      ? `已选择 ${state.selectedDirections.size} 个待审核方向`
+      : "未选择待审核方向";
+  document.querySelector("#bulk-approve-directions").disabled =
+    state.selectedDirections.size === 0;
+  document.querySelector("#bulk-reject-directions").disabled =
+    state.selectedDirections.size === 0;
+  applyRoleVisibility();
+}
+
+function renderInstruction() {
+  const instruction = state.sop.instruction;
+  const versions = state.sop.instruction_versions || [];
+  const container = document.querySelector("#instruction-content");
+  if (!instruction) {
+    container.innerHTML =
+      '<div class="empty-state"><strong>尚未发布全局指令</strong><p>没有指令版本时，需求生成会被门禁阻止。</p></div>';
+    applyRoleVisibility();
+    return;
+  }
+  document.querySelector("#instruction-status").textContent =
+    `已发布 · v${instruction.version}`;
+  document.querySelector("#instruction-status").className =
+    "status-pill status-running";
+  const content = instruction.content || {};
+  const sections = [
+    ["目标受众", [content.audience]],
+    ["视觉目标", [content.visual_goal]],
+    ["构图原则", content.composition_rules || []],
+    ["历史原则", content.historical_rules || []],
+    ["全局禁用", content.global_avoid || []],
+  ];
+  container.innerHTML = `
+    <section class="instruction-hero">
+      <div>
+        <span>当前生产版本</span>
+        <h3>${escapeHtml(instruction.name)}</h3>
+        <p>发布于 ${formatDate(instruction.published_at)} · 创建者 ${escapeHtml(
+          instruction.created_by,
+        )}</p>
+      </div>
+      <div class="instruction-version">v${instruction.version}</div>
+    </section>
+    <section class="instruction-grid">
+      ${sections
+        .map(
+          ([title, items], index) => `
+            <article>
+              <span>${String(index + 1).padStart(2, "0")}</span>
+              <h3>${escapeHtml(title)}</h3>
+              <ul>${(items || [])
+                .filter(Boolean)
+                .map((item) => `<li>${escapeHtml(item)}</li>`)
+                .join("")}</ul>
+            </article>`,
+        )
+        .join("")}
+    </section>
+    <section class="version-note">
+      <strong>版本规则</strong>
+      <p>需求卡与生产批次记录指令版本。未来发布 v${
+        instruction.version + 1
+      } 后，已启动任务仍使用当前版本，避免结果静默漂移。</p>
+    </section>
+    <section class="version-history-panel">
+      <div class="resource-section-head"><div><span class="resource-label">VERSION HISTORY</span><h3>指令版本记录</h3></div><strong>${versions.length} 个版本</strong></div>
+      <div class="version-history-list">
+        ${versions
+          .map(
+            (version) => `<article>
+              <div><strong>v${version.version} · ${escapeHtml(version.name)}</strong><span>${formatDate(
+                version.published_at || version.created_at,
+              )} · ${escapeHtml(version.created_by)}</span></div>
+              <div>${statusBadge(version.status, {
+                draft: ["草稿", "warning"],
+                published: ["已发布", "success"],
+                retired: ["已退役", "neutral"],
+              })}<span data-role-allow="content_editor,producer,system_admin"><button class="card-link" type="button" data-clone-instruction="${version.id}">克隆</button>${
+                version.id !== instruction.id
+                  ? `<button class="card-link" type="button" data-diff-instruction="${version.id}">与当前比较</button>`
+                  : ""
+              }${
+                version.status === "draft"
+                  ? `<button class="danger-button" type="button" data-retire-instruction="${version.id}">作废</button><button class="secondary-button" type="button" data-publish-instruction="${version.id}">发布</button>`
+                  : ""
+              }</span></div>
+            </article>`,
+          )
+          .join("")}
+      </div>
+    </section>`;
+  applyRoleVisibility();
+}
+
+function renderQueue() {
+  const batches = state.sop.batches || [];
+  const taskPage = state.sop.task_page || {
+    items: state.sop.tasks || [],
+    total: (state.sop.tasks || []).length,
+    limit: 50,
+    offset: 0,
+    has_previous: false,
+    has_next: false,
+  };
+  const tasks = taskPage.items || [];
+  const visibleBatches = state.queueBatchFilter
+    ? batches.filter((batch) => batch.id === state.queueBatchFilter)
+    : batches;
+  document.querySelector("#queue-task-status").value = state.queueTaskFilter;
+  document.querySelector("#queue-task-search").value = state.queueTaskQuery;
+  document.querySelector("#queue-error-filter").value = state.queueErrorFilter;
+  document.querySelector("#queue-batch-filter").innerHTML = [
+    '<option value="">全部批次</option>',
+    ...batches.map(
+      (batch) => `<option value="${batch.id}">${escapeHtml(batch.name)}</option>`,
+    ),
+  ].join("");
+  document.querySelector("#queue-batch-filter").value = state.queueBatchFilter;
+  const filterBanner = document.querySelector("#queue-filter-banner");
+  const filterLabels = [
+    state.queueTaskFilter
+      ? `状态：${taskStatusMeta[state.queueTaskFilter]?.[0] || state.queueTaskFilter}`
+      : "",
+    state.queueBatchFilter
+      ? `批次：${batches.find((batch) => batch.id === state.queueBatchFilter)?.name || state.queueBatchFilter}`
+      : "",
+    state.queueErrorFilter ? `错误：${state.queueErrorFilter}` : "",
+    state.queueTaskQuery ? `搜索：${state.queueTaskQuery}` : "",
+  ].filter(Boolean);
+  filterBanner.hidden = filterLabels.length === 0;
+  filterBanner.innerHTML = filterLabels.length
+    ? `<span>当前筛选：${escapeHtml(filterLabels.join(" · "))}</span><button class="secondary-button" type="button" data-clear-queue-filter>清除筛选</button>`
+    : "";
+  const summary = {
+    active: batches.filter((batch) => ["queued", "running"].includes(batch.status)).length,
+    completed: batches.filter((batch) => batch.status === "completed").length,
+    failed: batches.filter((batch) =>
+      ["partially_failed", "budget_blocked"].includes(batch.status),
+    ).length,
+    ready: state.sop.summary?.todos.ready_for_production || 0,
+  };
+  document.querySelector("#queue-summary").innerHTML = [
+    ["待排产诗词", summary.ready],
+    ["执行中批次", summary.active],
+    ["已完成批次", summary.completed],
+    ["异常批次", summary.failed],
+  ]
+    .map(
+      ([label, value]) =>
+        `<article><span>${label}</span><strong>${value}</strong></article>`,
+    )
+    .join("");
+  document.querySelector("#queue-list").innerHTML = visibleBatches.length
+    ? visibleBatches
+        .map(
+          (batch) => {
+            const batchTasks = tasks.filter((task) => task.batch_id === batch.id);
+            const failed = batchTasks.filter((task) =>
+              ["failed", "blocked"].includes(task.status),
+            ).length;
+            const actions = [];
+            if (batch.status === "draft") {
+              actions.push(["start", "启动批次", "approve-button"]);
+              actions.push(["cancel", "取消", "danger-button"]);
+            } else if (["queued", "running"].includes(batch.status)) {
+              actions.push(["pause", "暂停", "secondary-button"]);
+              actions.push(["cancel", "取消未开始", "danger-button"]);
+            } else if (batch.status === "paused") {
+              actions.push(["resume", "继续运行", "approve-button"]);
+              actions.push(["cancel", "取消", "danger-button"]);
+            } else if (batch.status === "partially_failed") {
+              actions.push(["retry-failed", `重试失败 ${failed}`, "approve-button"]);
+            } else if (batch.status === "budget_blocked") {
+              actions.push(["start", "预算调整后重试", "secondary-button"]);
+              actions.push(["cancel", "取消", "danger-button"]);
+            }
+            return `
+              <article class="batch-card">
+                <header>
+                  <div class="batch-title">
+                    <span class="job-indicator status-${batch.status}"></span>
+                    <div><strong>${escapeHtml(batch.name)}</strong><p>${escapeHtml(
+                      batch.provider,
+                    )} · ${escapeHtml(batch.model)} · ${escapeHtml(
+                      batch.style_id,
+                    )} · ${batch.task_count} 个任务</p></div>
+                  </div>
+                  <div class="batch-head-side">
+                    ${statusBadge(batch.status, batchStatusMeta)}
+                    <time>${formatDate(batch.created_at)}</time>
+                  </div>
+                </header>
+                <div class="batch-metrics">
+                  <span><small>成功</small><strong>${batch.succeeded_count || 0}</strong></span>
+                  <span><small>失败</small><strong>${batch.failed_count || 0}</strong></span>
+                  <span><small>需核对</small><strong>${batch.blocked_count || 0}</strong></span>
+                  <span><small>预计成本</small><strong>${Number(
+                    batch.estimated_cost || 0,
+                  ).toFixed(2)} ${escapeHtml(batch.currency)}</strong></span>
+                  <span><small>实际成本</small><strong>${Number(
+                    batch.actual_cost || 0,
+                  ).toFixed(2)} ${escapeHtml(batch.currency)}</strong></span>
+                </div>
+                <div class="batch-progress-row">
+                  <div><span style="width:${batch.progress || 0}%"></span></div>
+                  <strong>${batch.progress || 0}%</strong>
+                </div>
+                ${
+                  batchTasks.length
+                    ? `<details class="task-details"><summary>查看 ${batchTasks.length} 个任务</summary><div>
+                        ${batchTasks
+                          .map(
+                            (task) => `<article>
+                              <span>${escapeHtml(task.poem_title)}</span>
+                              <small>${escapeHtml(
+                                directionTypeMeta[task.direction_type]?.[0] ||
+                                  task.direction_type,
+                              )} · 第 ${task.sample_index} 张</small>
+                              ${statusBadge(task.status, taskStatusMeta)}
+                              <i>${task.attempt_count} / ${task.max_attempts} 次</i>
+                              ${
+                                task.last_error_message
+                                  ? `<p>${escapeHtml(task.last_error_message)}</p>`
+                                  : ""
+                              }
+                            </article>`,
+                          )
+                          .join("")}
+                      </div></details>`
+                    : ""
+                }
+                <footer>
+                  <span>批次 ID · ${escapeHtml(batch.id.slice(-8))}</span>
+                  <div>${actions
+                    .map(
+                      ([action, label, className]) =>
+                        `<button class="${className}" type="button" data-role-allow="ai_operator,producer,system_admin" data-batch-action="${action}" data-batch-id="${batch.id}">${label}</button>`,
+                    )
+                    .join("")}</div>
+                </footer>
+              </article>`;
+          },
+        )
+        .join("")
+    : `<div class="empty-state"><strong>${
+        state.queueBatchFilter ? "没有符合筛选条件的批次" : "还没有生产批次"
+      }</strong><p>${
+        state.queueBatchFilter
+          ? "清除筛选可查看全部批次。"
+          : "批准画面方向后，点击“创建生产批次”统一排产。"
+      }</p></div>`;
+
+  const total = Number(taskPage.total || 0);
+  const offset = Number(taskPage.offset || 0);
+  const pageEnd = Math.min(total, offset + tasks.length);
+  document.querySelector("#task-page-summary").textContent = `${total} 条匹配任务`;
+  document.querySelector("#task-page-range").textContent = total
+    ? `${offset + 1}–${pageEnd} / ${total}`
+    : "0–0 / 0";
+  document.querySelector("#task-page-previous").disabled = !taskPage.has_previous;
+  document.querySelector("#task-page-previous").dataset.taskPageOffset = String(
+    Math.max(0, offset - Number(taskPage.limit || 50)),
+  );
+  document.querySelector("#task-page-next").disabled = !taskPage.has_next;
+  document.querySelector("#task-page-next").dataset.taskPageOffset = String(
+    offset + Number(taskPage.limit || 50),
+  );
+  document.querySelector("#task-table-body").innerHTML = tasks.length
+    ? tasks
+        .map(
+          (task) => `<tr>
+            <td><strong>${escapeHtml(task.poem_title)}</strong><small class="table-subline">第 ${task.sample_index} 张 · ${escapeHtml(task.poem_id)}</small></td>
+            <td><span>${escapeHtml(task.batch_name)}</span><small class="table-subline">${escapeHtml(task.provider)} · ${escapeHtml(task.model)}</small></td>
+            <td>${escapeHtml(directionTypeMeta[task.direction_type]?.[0] || task.direction_type)}</td>
+            <td>${statusBadge(task.status, taskStatusMeta)}</td>
+            <td>${task.attempt_count} / ${task.max_attempts}</td>
+            <td>${task.last_error_code ? `<strong class="error-code">${escapeHtml(task.last_error_code)}</strong><small class="table-subline">${escapeHtml(task.last_error_message)}</small>` : '<span class="muted-value">—</span>'}</td>
+            <td>${formatDate(task.updated_at)}</td>
+          </tr>`,
+        )
+        .join("")
+    : '<tr><td colspan="7"><div class="empty-state compact"><strong>没有符合条件的任务</strong><p>调整状态、批次、错误码或搜索条件。</p></div></td></tr>';
+  applyRoleVisibility();
+}
+
+function imageCard(image, final = false) {
+  return `
+    <article class="image-card">
+      <button class="image-preview" type="button" data-open-image="${image.id}">
+        <img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.poem_title)}插图" loading="lazy" />
+        <span>${image.generation_mode === "converge" ? "返工衍生" : "初始探索"}</span>
+      </button>
+      <div class="image-card-copy">
+        <div><h3>${escapeHtml(image.poem_title)}</h3><p>${escapeHtml(
+          image.author,
+        )} · ${escapeHtml(image.style_name)}</p></div>
+        ${statusBadge(image.decision === "final" ? "approved" : "candidate_review")}
+      </div>
+      ${
+        final
+          ? `<footer><a class="approve-button link-button" href="${escapeHtml(
+              image.url,
+            )}" download>保存原图</a></footer>`
+          : `<footer>
+              <button class="danger-button" type="button" data-image-action="rejected" data-image-id="${image.id}">淘汰</button>
+              <button class="approve-button" type="button" data-image-action="selected" data-image-id="${image.id}">入选方向</button>
+            </footer>`
+      }
+    </article>`;
+}
+
+function productionImageCard(image) {
+  const qc = image.qc || {};
+  const blocked = ["qc_blocked", "needs_manual_qc"].includes(image.status);
+  const checked = state.reviewSelection.has(image.id);
+  const directionLabel =
+    directionTypeMeta[image.direction_type]?.[0] || image.direction_type || "方向";
+  return `
+    <article class="review-candidate ${blocked ? "is-qc-blocked" : ""} ${
+      checked ? "is-compare-selected" : ""
+    }">
+      <label class="compare-check" title="加入 A/B 对比">
+        <input type="checkbox" data-compare-image="${image.id}" ${checked ? "checked" : ""} />
+        <span>对比</span>
+      </label>
+      <button class="image-preview" type="button" data-open-image="${image.id}">
+        <img src="${escapeHtml(image.url)}" alt="${escapeHtml(
+          image.poem_title,
+        )}插图" loading="lazy" />
+        <span>第 ${image.generation} 代 · ${escapeHtml(directionLabel)}</span>
+        <strong class="qc-score ${blocked ? "is-danger" : ""}">${Math.round(
+          Number(qc.score || 0),
+        )}</strong>
+      </button>
+      <div class="review-candidate-copy">
+        <div><strong>${escapeHtml(image.batch_name)}</strong><small>${escapeHtml(
+          image.style_id,
+        )} · ${escapeHtml(image.provider)}</small></div>
+        ${statusBadge(image.status, productionImageStatusMeta)}
+      </div>
+      <div class="review-risk-row">
+        ${(qc.hard_failures || [])
+          .slice(0, 2)
+          .map((risk) => `<span class="is-danger">${escapeHtml(risk)}</span>`)
+          .join("")}
+        ${(qc.warnings || [])
+          .slice(0, blocked ? 1 : 2)
+          .map((risk) => `<span>${escapeHtml(risk)}</span>`)
+          .join("")}
+      </div>
+      <footer>
+        <span>QC ${escapeHtml(qc.version || "—")} · ${image.width}×${image.height}</span>
+        <button class="secondary-button" type="button" data-open-image="${image.id}">进入审片</button>
+      </footer>
+    </article>`;
+}
+
+function renderReview() {
+  const queue = state.sop.review_queue || { groups: [], summary: {} };
+  const groups = queue.groups
+    .map((group) => ({
+      ...group,
+      candidates: group.candidates.filter(
+        (image) =>
+          state.reviewShowBlocked ||
+          !["qc_blocked", "needs_manual_qc"].includes(image.status),
+      ),
+    }))
+    .filter((group) => group.candidates.length);
+  const visibleCount = groups.reduce(
+    (total, group) => total + group.candidates.length,
+    0,
+  );
+  document.querySelector("#review-summary").innerHTML = [
+    ["待审候选", queue.summary.review_ready || 0],
+    ["已入选", queue.summary.selected || 0],
+    ["终审候选", queue.summary.final_candidate || 0],
+    ["QC 隔离", queue.summary.qc_blocked || 0],
+  ]
+    .map(
+      ([label, value]) =>
+        `<article><span>${label}</span><strong>${value}</strong></article>`,
+    )
+    .join("");
+  document.querySelector("#review-grid").innerHTML = groups
+    .map(
+      (group) => `
+        <section class="review-poem-group">
+          <header>
+            <div><span>${escapeHtml(group.author)}</span><h3>${escapeHtml(
+              group.poem_title,
+            )}</h3></div>
+            <strong>${group.candidates.length} 张候选</strong>
+          </header>
+          <div class="review-grid">${group.candidates
+            .map((image) => productionImageCard(image))
+            .join("")}</div>
+        </section>`,
+    )
+    .join("");
+  const empty = document.querySelector("#review-empty");
+  empty.hidden = visibleCount > 0;
+  empty.innerHTML =
+    "<strong>当前没有待审候选</strong><p>完成方向审批并启动生产批次后，候选会按诗词进入这里。</p>";
+  const compareButton = document.querySelector("#compare-selected-button");
+  compareButton.disabled = state.reviewSelection.size < 2;
+  compareButton.textContent = `对比所选 ${state.reviewSelection.size} / 4`;
+}
+
+function renderAssets() {
+  const allAssets = state.sop.final_assets || [];
+  const query = state.assetQuery.trim().toLowerCase();
+  const assets = allAssets.filter((asset) =>
+    !query
+      ? true
+      : [asset.poem_title, asset.author, asset.style_id]
+          .join(" ")
+          .toLowerCase()
+          .includes(query),
+  );
+  const currentAssets = allAssets.filter((asset) => asset.is_current);
+  document.querySelector("#asset-summary").innerHTML = [
+    ["当前成品", currentAssets.length],
+    ["历史版本", allAssets.filter((asset) => !asset.is_current).length],
+    ["已完成导出", (state.sop.export_packages || []).filter((item) => item.status === "completed").length],
+    ["交付诗词", state.sop.summary?.status_counts?.exported || 0],
+  ]
+    .map(
+      ([label, value]) =>
+        `<article><span>${label}</span><strong>${value}</strong></article>`,
+    )
+    .join("");
+  document.querySelector("#asset-grid").innerHTML = assets
+    .map(
+      (asset) => `<article class="final-asset-card">
+        <a class="image-preview" href="${escapeHtml(asset.url)}" target="_blank" rel="noreferrer">
+          <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(
+            asset.poem_title,
+          )}终审成品" loading="lazy" />
+          <span>${asset.is_current ? "当前交付版" : "历史版本"} · v${asset.version}</span>
+        </a>
+        <div class="final-asset-copy">
+          <div><small>${escapeHtml(asset.author)} · ${escapeHtml(
+            asset.style_id,
+          )}</small><h3>${escapeHtml(asset.poem_title)}</h3></div>
+          ${statusBadge(asset.is_current ? "approved" : "archived")}
+          <dl>
+            <div><dt>规格</dt><dd>${asset.width}×${asset.height}</dd></div>
+            <div><dt>格式</dt><dd>${escapeHtml(asset.mime_type)}</dd></div>
+            <div><dt>校验和</dt><dd>${escapeHtml(asset.checksum.slice(0, 12))}…</dd></div>
+            <div><dt>锁定时间</dt><dd>${formatDate(asset.created_at)}</dd></div>
+          </dl>
+        </div>
+        <footer><a class="secondary-button link-button" href="${escapeHtml(
+          asset.url,
+        )}" download>保存原图</a></footer>
+      </article>`,
+    )
+    .join("");
+  const empty = document.querySelector("#asset-empty");
+  empty.hidden = assets.length > 0;
+  empty.innerHTML =
+    "<strong>还没有完成双终审的资产</strong><p>候选需要内容终审和美术终审均通过，才会锁定为当前交付版本。</p>";
+  const exportButton = document.querySelector("#export-assets-button");
+  exportButton.disabled = currentAssets.length === 0;
+  exportButton.textContent = currentAssets.length
+    ? `导出 ${currentAssets.length} 个当前成品`
+    : "暂无可导出成品";
+  document.querySelector("#export-list").innerHTML = (state.sop.export_packages || []).length
+    ? state.sop.export_packages
+        .map(
+          (item) => `<article>
+            <div><strong>${escapeHtml(item.name)}</strong><span>${formatDate(
+              item.completed_at || item.created_at,
+            )} · ${item.asset_count} 个成品</span></div>
+            ${statusBadge(
+              item.status,
+              {
+                creating: ["生成中", "running"],
+                completed: ["已完成", "success"],
+                failed: ["失败", "danger"],
+              },
+            )}
+            ${
+              item.status === "completed"
+                ? `<a class="secondary-button link-button" href="/exports/${escapeHtml(
+                    item.name,
+                  )}/manifest.json" target="_blank" rel="noreferrer">查看 Manifest</a>`
+                : `<span class="export-error">${escapeHtml(item.error || "")}</span>`
+            }
+          </article>`,
+        )
+        .join("")
+    : '<div class="empty-state compact"><strong>暂无导出记录</strong><p>导出后会保留包名、数量、校验和与 Manifest 地址。</p></div>';
+}
+
+function renderResources() {
+  const styles = state.sop.style_packs || [];
+  const provider = state.sop.provider_status || state.legacy.config.provider_status || {};
+  const budget = state.sop.budget || {};
+  const hardLimit = Number(budget.hard_limit || 0);
+  const spent = Number(budget.spent || 0);
+  const usedPercent = hardLimit ? Math.min(100, Math.round((spent / hardLimit) * 100)) : 0;
+  document.querySelector("#resource-grid").innerHTML = `
+    <article class="resource-panel engine-panel">
+      <span class="resource-label">IMAGE PROVIDER</span>
+      <div class="engine-state">
+        <i class="${provider.status === "ready" ? "is-live" : ""}"></i>
+        <div><strong>${
+          provider.status === "circuit_open"
+            ? "Provider 已熔断"
+            : provider.provider === "openai"
+            ? provider.configured
+              ? "图像 Provider 已配置"
+              : "图像 Provider 待配置"
+            : "本地演示引擎"
+        }</strong><small>${escapeHtml(provider.model || "demo-renderer")}</small></div>
+      </div>
+      <p>${
+        provider.status === "circuit_open"
+          ? `连续失败已暂停同 Provider 批次，约 ${Number(
+              provider.circuit?.retry_after_seconds || 0,
+            )} 秒后可人工恢复。`
+          : provider.live_generation
+          ? "真实生成会记录模型、参数和任务结果。"
+          : "当前不会产生 API 费用，适合验证 SOP 与状态流。"
+      }</p>
+      <div class="provider-specs">
+        <span><small>并发</small><strong>${Number(provider.concurrency || 1)}</strong></span>
+        <span><small>生成超时</small><strong>${Number(
+          provider.timeouts_seconds?.generation || 0,
+        )}s</strong></span>
+        <span><small>最大尝试</small><strong>${Number(provider.max_attempts || 0)}</strong></span>
+        <span><small>熔断</small><strong>${provider.circuit?.state === "open" ? "OPEN" : "CLOSED"}</strong></span>
+      </div>
+    </article>
+    <article class="resource-panel budget-panel">
+      <span class="resource-label">BUDGET GATE</span>
+      <div class="budget-title"><h3>预算闸门</h3>${statusBadge(
+        budget.soft_warning ? "soft_warning" : "normal",
+        {
+          normal: ["预算正常", "success"],
+          soft_warning: ["已到软提醒线", "warning"],
+        },
+      )}</div>
+      <div class="budget-bar"><span style="width:${usedPercent}%"></span></div>
+      <div class="budget-values">
+        <span><small>已用</small><strong>${spent.toFixed(2)}</strong></span>
+        <span><small>预留</small><strong>${Number(budget.reserved || 0).toFixed(2)}</strong></span>
+        <span><small>余额</small><strong>${Number(budget.remaining || 0).toFixed(2)} ${escapeHtml(
+          budget.currency || "USD",
+        )}</strong></span>
+      </div>
+      <form class="budget-form" id="budget-form" data-role-allow="producer,system_admin">
+        <label><span>硬停止上限</span><input class="dialog-input" name="hard_limit" type="number" min="0" max="1000000" step="0.01" value="${hardLimit}" required /></label>
+        <label><span>软提醒比例</span><input class="dialog-input" name="soft_ratio" type="number" min="0.1" max="1" step="0.05" value="${Number(
+          budget.soft_ratio || 0.7,
+        )}" required /></label>
+        <button class="secondary-button" type="submit">保存预算规则</button>
+      </form>
+      <p>批次启动与失败重试都会重新校验可用余额；超出硬上限时不会调用 Provider。</p>
+    </article>
+    <article class="resource-panel backup-panel">
+      <span class="resource-label">BACKUP & RECOVERY</span>
+      <div class="backup-title"><h3>生产数据备份</h3><button class="secondary-button" type="button" data-role-allow="system_admin" data-create-backup>立即备份</button></div>
+      <p>使用 SQLite 在线备份 API，并复制诗词种子、旧状态、生成图片与历史导出；恢复只允许写入空目录。</p>
+      <div class="backup-list">
+        ${(state.sop.backups || []).length
+          ? state.sop.backups
+              .slice(0, 4)
+              .map(
+                (backup) => `<article><div><strong>${escapeHtml(
+                  backup.name,
+                )}</strong><span>${formatDate(backup.created_at)} · ${
+                  backup.file_count
+                } 个文件</span></div><button class="secondary-button" type="button" data-role-allow="system_admin" data-verify-backup="${escapeHtml(
+                  backup.name,
+                )}">校验</button></article>`,
+              )
+              .join("")
+          : "<span>尚无备份。完成首个生产批次后建议立即创建。</span>"}
+      </div>
+    </article>
+    <section class="style-resource-section">
+      <div class="resource-section-head"><div><span class="resource-label">STYLE PACKS</span><h3>首批风格基线</h3></div><strong>${styles.length} 个版本</strong></div>
+      <div class="style-resource-grid">
+        ${styles
+          .map(
+            (style) => `
+              <article class="style-card">
+                <div class="palette">
+                  ${(style.palette || [])
+                    .map((color) => `<span style="--color:${escapeHtml(color)}"></span>`)
+                    .join("")}
+                </div>
+                <div class="style-card-status"><span>${escapeHtml(
+                  style.status.toUpperCase(),
+                )} · v${style.version}</span>${statusBadge(style.status, {
+                  draft: ["草稿", "warning"],
+                  published: ["已发布", "success"],
+                  retired: ["已退役", "neutral"],
+                })}</div>
+                <h4>${escapeHtml(style.name)}</h4>
+                <p>${escapeHtml(style.description)}</p>
+                <small>${escapeHtml(style.short_name)} · ${escapeHtml(
+                  style.settings?.paper || "unspecified",
+                )} paper</small>
+                <small>适用：${escapeHtml((style.applicable_topics || []).join("、") || "未设置")}</small>
+                ${
+                  style.status === "draft"
+                    ? `<button class="secondary-button" type="button" data-role-allow="art_director,producer,system_admin" data-publish-style="${style.id}">发布此版本</button>`
+                    : ""
+                }
+              </article>`,
+          )
+          .join("")}
+      </div>
+    </section>`;
+  applyRoleVisibility();
+}
+
+function statusSummary(items) {
+  const counts = {};
+  (items || []).forEach((item) => {
+    const key = item.status || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([status, count]) => `<span>${statusBadge(status, {
+      ...requirementStatusMeta,
+      ...taskStatusMeta,
+      ...productionImageStatusMeta,
+    })}<strong>${count}</strong></span>`)
+    .join("");
+}
+
+async function openPoemDetail(poemId) {
+  const dialog = document.querySelector("#poem-detail-dialog");
+  const content = document.querySelector("#poem-detail-content");
+  const localPoem = poemById(poemId);
+  document.querySelector("#poem-detail-title").textContent = localPoem
+    ? `${localPoem.title} · 全链路详情`
+    : "诗词生产详情";
+  content.innerHTML =
+    '<div class="empty-state compact"><strong>正在加载生产链路</strong><p>读取内容、需求、方向、任务、候选、终审与导出记录。</p></div>';
+  if (!dialog.open) dialog.showModal();
+  try {
+    const detail = await api(`/api/poems/${poemId}`);
+    const poem = detail.poem;
+    const counts = detail.counts || {};
+    document.querySelector("#poem-detail-title").textContent = `${poem.title} · 全链路详情`;
+    const latestRequirement = detail.requirements.find((item) => item.is_current);
+    const requirementRuns = detail.requirement_generation_runs || [];
+    const latestRequirementRun = requirementRuns[0];
+    const currentDirections = detail.directions.filter((item) => item.is_current);
+    const currentAsset = detail.final_assets.find((item) => item.is_current);
+    content.innerHTML = `
+      <section class="poem-detail-hero">
+        <div><span>${escapeHtml(poem.dynasty)} · ${escapeHtml(poem.author)} · ${escapeHtml(poem.theme || "未分类")}</span><h3>${escapeHtml(poem.title)}</h3><p>${(poem.lines || []).map(escapeHtml).join("<br>")}</p></div>
+        <div>${statusBadge(poem.status)}<small>更新于 ${formatDate(poem.updated_at)}</small>${poem.blocked_reason ? `<strong class="error-code">${escapeHtml(poem.blocked_reason)}</strong>` : ""}</div>
+      </section>
+      <section class="poem-chain-metrics">
+        ${[
+          ["内容版本", counts.content_versions || 0],
+          ["需求版本", counts.requirements || 0],
+          ["需求运行", counts.requirement_generation_runs || 0],
+          ["方向版本", counts.directions || 0],
+          ["生成任务", counts.tasks || 0],
+          ["候选图片", counts.images || 0],
+          ["返工单", counts.reworks || 0],
+          ["成品版本", counts.final_assets || 0],
+          ["导出记录", counts.exports || 0],
+        ]
+          .map(([label, value]) => `<article><span>${escapeHtml(label)}</span><strong>${value}</strong></article>`)
+          .join("")}
+      </section>
+      <section class="poem-chain-grid">
+        <article>
+          <header><span>S1</span><div><strong>内容与需求</strong><small>版本冻结与证据</small></div></header>
+          <p>内容 v${detail.content_versions[0]?.version || "—"} · ${escapeHtml(detail.content_versions[0]?.status || "缺失")}</p>
+          <p>需求 ${latestRequirement ? `v${latestRequirement.version} · ${escapeHtml(latestRequirement.status)}` : "尚未生成"}</p>
+          <p>${latestRequirementRun ? `${escapeHtml(latestRequirementRun.schema_version)} · ${escapeHtml(latestRequirementRun.status)} · 修复 ${latestRequirementRun.repair_attempts || 0}/1` : "尚无需求生成运行记录"}</p>
+          ${latestRequirementRun?.error_code ? `<small class="error-code">${escapeHtml(latestRequirementRun.error_code)} · ${escapeHtml(latestRequirementRun.error_message)}</small>` : ""}
+          ${latestRequirement ? `<small>${escapeHtml(latestRequirement.content?.composition || "未填写构图命题")}</small>` : ""}
+        </article>
+        <article>
+          <header><span>S2</span><div><strong>画面方向</strong><small>当前版本 ${currentDirections.length} 个</small></div></header>
+          <div class="poem-status-summary">${statusSummary(currentDirections) || '<span class="muted-value">尚无方向</span>'}</div>
+          <p>${currentDirections.map((item) => `${directionTypeMeta[item.type]?.[0] || item.type} v${item.version}`).join(" · ") || "等待需求批准"}</p>
+        </article>
+        <article>
+          <header><span>S3</span><div><strong>任务与候选</strong><small>批次执行结果</small></div></header>
+          <div class="poem-status-summary">${statusSummary(detail.tasks) || '<span class="muted-value">尚无任务</span>'}</div>
+          <p>${detail.images.length} 张候选 · ${detail.rework_orders.length} 张返工单</p>
+        </article>
+        <article>
+          <header><span>S4</span><div><strong>终审与交付</strong><small>当前成品和历史包</small></div></header>
+          <p>${currentAsset ? `成品 v${currentAsset.version} · ${currentAsset.width}×${currentAsset.height}` : "尚未锁定成品"}</p>
+          <p>${detail.exports.length ? `已进入 ${detail.exports.length} 个导出包` : "尚未导出"}</p>
+        </article>
+      </section>
+      ${
+        detail.images.length
+          ? `<section class="poem-detail-section"><header><div><span>CANDIDATES</span><h3>候选与衍生谱系</h3></div><strong>${detail.images.length} 张</strong></header><div class="poem-detail-images">${detail.images
+              .slice(0, 12)
+              .map(
+                (image) => `<article><img src="${escapeHtml(image.url)}" alt="${escapeHtml(poem.title)}候选图" loading="lazy"><div><strong>第 ${image.generation} 代 · ${escapeHtml(directionTypeMeta[image.direction_type]?.[0] || image.direction_type)}</strong>${statusBadge(image.status, productionImageStatusMeta)}<small>QC ${Math.round(Number(image.qc?.score || 0))} · ${escapeHtml(image.model)}</small></div></article>`,
+              )
+              .join("")}</div></section>`
+          : ""
+      }
+      <section class="poem-detail-section">
+        <header><div><span>AUDIT TRAIL</span><h3>最近生产记录</h3></div><strong>${detail.audit_events.length} 条</strong></header>
+        <div class="poem-audit-list">${detail.audit_events.length
+          ? detail.audit_events
+              .slice(0, 20)
+              .map(
+                (item) => `<article><i></i><div><strong>${escapeHtml(item.action)}</strong><span>${escapeHtml(item.actor_role)} · ${escapeHtml(item.actor_id)}</span></div><time>${formatDate(item.created_at)}</time></article>`,
+              )
+              .join("")
+          : '<div class="empty-state compact"><strong>暂无审计记录</strong><p>阶段推进后会显示操作者与时间。</p></div>'}</div>
+      </section>`;
+  } catch (error) {
+    content.innerHTML = `<div class="empty-state compact"><strong>详情加载失败</strong><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function openInstructionDialog(sourceId = "") {
+  const form = document.querySelector("#instruction-form");
+  const current =
+    state.sop.instruction_versions.find((item) => item.id === sourceId) ||
+    state.sop.instruction ||
+    {};
+  const content = current.content || {};
+  form.reset();
+  form.elements.name.value = current.name
+    ? `${current.name.replace(/\s+v\d+$/i, "")} v${Number(current.version || 0) + 1}`
+    : "唐诗三百首全局创作规范";
+  form.elements.audience.value = content.audience || "";
+  form.elements.visual_goal.value = content.visual_goal || "";
+  form.elements.composition_rules.value = (content.composition_rules || []).join("\n");
+  form.elements.historical_rules.value = (content.historical_rules || []).join("\n");
+  form.elements.global_avoid.value = (content.global_avoid || []).join("\n");
+  document.querySelector("#instruction-dialog").showModal();
+}
+
+function openInstructionDiff(versionId) {
+  const published = state.sop.instruction;
+  const compared = state.sop.instruction_versions.find((item) => item.id === versionId);
+  if (!published || !compared) return;
+  const fields = [
+    ["目标受众", "audience", false],
+    ["视觉目标", "visual_goal", false],
+    ["构图原则", "composition_rules", true],
+    ["历史原则", "historical_rules", true],
+    ["全局禁用", "global_avoid", true],
+  ];
+  const rows = fields
+    .map(([label, key, isList]) => {
+      const left = isList
+        ? (published.content?.[key] || []).map(String)
+        : [String(published.content?.[key] || "")];
+      const right = isList
+        ? (compared.content?.[key] || []).map(String)
+        : [String(compared.content?.[key] || "")];
+      const added = right.filter((item) => !left.includes(item));
+      const removed = left.filter((item) => !right.includes(item));
+      if (!added.length && !removed.length) return "";
+      return `<article class="instruction-diff-row"><h3>${escapeHtml(label)}</h3>
+        ${removed.map((item) => `<p class="is-removed">− ${escapeHtml(item)}</p>`).join("")}
+        ${added.map((item) => `<p class="is-added">＋ ${escapeHtml(item)}</p>`).join("")}
+      </article>`;
+    })
+    .filter(Boolean);
+  document.querySelector("#instruction-diff-title").textContent = `当前 v${published.version} ↔ v${compared.version}`;
+  document.querySelector("#instruction-diff-content").innerHTML = rows.length
+    ? `<div class="instruction-diff-list">${rows.join("")}</div>`
+    : '<div class="empty-state compact"><strong>内容没有差异</strong><p>名称或状态可能不同，但创作规则一致。</p></div>';
+  document.querySelector("#instruction-diff-dialog").showModal();
+}
+
+async function retireInstructionVersion(versionId) {
+  const reason = window.prompt("请输入作废草稿的原因：", "")?.trim() || "";
+  if (!reason) return;
+  try {
+    await api(`/api/instructions/${versionId}/retire`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    await refreshSop("指令草稿已作废，原因已写入审计记录。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function saveInstructionVersion(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api("/api/instructions", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        name: data.get("name"),
+        content: {
+          audience: data.get("audience"),
+          visual_goal: data.get("visual_goal"),
+          composition_rules: asLines(data.get("composition_rules")),
+          historical_rules: asLines(data.get("historical_rules")),
+          global_avoid: asLines(data.get("global_avoid")),
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#instruction-dialog").close();
+    await refreshSop(`指令 v${result.instruction.version} 已保存为草稿，发布前不会影响生产。`);
+    switchView("instructions");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function publishInstructionVersion(instructionId) {
+  if (!window.confirm("发布后当前线上指令会退役，新需求将绑定此版本。确认发布？")) return;
+  try {
+    const result = await api(`/api/instructions/${instructionId}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop(`指令 v${result.instruction.version} 已发布，历史任务仍保持原版本。`);
+    switchView("instructions");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openStyleDialog() {
+  document.querySelector("#style-form").reset();
+  document.querySelector("#style-dialog").showModal();
+}
+
+function commaList(value) {
+  return String(value || "")
+    .split(/[，,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function saveStyleVersion(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api("/api/style-packs", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        style_id: data.get("style_id"),
+        name: data.get("name"),
+        short_name: data.get("short_name"),
+        description: data.get("description"),
+        prompt_fragment: data.get("prompt_fragment"),
+        applicable_topics: commaList(data.get("applicable_topics")),
+        palette: commaList(data.get("palette")),
+        settings: {
+          background: data.get("background"),
+          foreground: data.get("foreground"),
+          accent: data.get("accent"),
+          paper: data.get("paper"),
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#style-dialog").close();
+    await refreshSop(`风格 ${result.style.style_id} v${result.style.version} 已保存为草稿。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function publishStyleVersion(versionId) {
+  if (!window.confirm("发布后新批次将默认使用此版本，历史批次不受影响。确认发布？")) return;
+  try {
+    const result = await api(`/api/style-packs/${versionId}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop(`风格 ${result.style.style_id} v${result.style.version} 已发布。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function saveBudget(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api(`/api/projects/${project().id}/budget`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        hard_limit: Number(data.get("hard_limit")),
+        soft_ratio: Number(data.get("soft_ratio")),
+        actor: ACTOR,
+      }),
+    });
+    state.sop.budget = result.budget;
+    renderOverview();
+    renderResources();
+    showToast("预算规则已保存，后续批次会按新上限重新校验。");
+  } catch (error) {
+    submit.disabled = false;
+    showToast(error.message, "error");
+  }
+}
+
+async function createProductionBackup() {
+  try {
+    const result = await api("/api/backups", {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop(`备份 ${result.backup.name} 已创建并通过完整性校验。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function verifyProductionBackup(name) {
+  try {
+    const result = await api(`/api/backups/${name}/verify`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    showToast(
+      result.backup.valid
+        ? `备份 ${name} 校验通过。`
+        : `备份 ${name} 校验失败。`,
+      result.backup.valid ? "success" : "error",
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function renderAll() {
+  renderChrome();
+  renderOverview();
+  renderProductionReport();
+  renderPoemTable();
+  renderRequirements();
+  renderDirections();
+  renderInstruction();
+  renderQueue();
+  renderReview();
+  renderAssets();
+  renderResources();
+  applyRoleVisibility();
+}
+
+function switchView(view) {
+  if (!viewMeta[view]) view = "overview";
+  state.activeView = view;
+  document
+    .querySelectorAll("[data-view-panel]")
+    .forEach((panel) => panel.classList.toggle("is-active", panel.dataset.viewPanel === view));
+  document
+    .querySelectorAll("[data-view]")
+    .forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
+  document.querySelector("#page-eyebrow").textContent = viewMeta[view][0];
+  document.querySelector("#page-title").textContent = viewMeta[view][1];
+  history.replaceState(null, "", `#${view}`);
+  window.scrollTo({ top: 0, behavior: "auto" });
+}
+
+function selectedIdsOrWarn() {
+  const ids = [...state.selectedPoems];
+  if (!ids.length) showToast("请先在生产表中选择诗词。", "warning");
+  return ids;
+}
+
+async function generateRequirements(poemIds) {
+  if (!poemIds.length) return;
+  setSyncState("loading", `正在生成 ${poemIds.length} 首需求`);
+  try {
+    const result = await api("/api/requirements/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        poem_ids: poemIds,
+        actor: ACTOR,
+      }),
+    });
+    state.selectedPoems.clear();
+    await refreshSop(
+      `已生成 ${result.succeeded} 首需求${
+        result.failed ? `，${result.failed} 首未处理` : ""
+      }`,
+    );
+  } catch (error) {
+    setSyncState("error", "需求生成失败");
+    showToast(error.message, "error");
+  }
+}
+
+async function regenerateRequirement(poemId) {
+  if (!window.confirm("将创建新需求版本，只保留已锁字段，并使旧画面方向退出新排产。确认继续？")) return;
+  try {
+    const result = await api("/api/requirements/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        poem_ids: [poemId],
+        preserve_locked: true,
+        actor: ACTOR,
+      }),
+    });
+    const item = result.results?.[0] || {};
+    if (!item.ok) throw new Error(item.message || "需求重算未完成。");
+    await refreshSop(
+      item.preserved_fields?.length
+        ? `需求已重算，保留 ${item.preserved_fields.length} 个锁定字段。`
+        : "需求已重算为新版本。",
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function bulkDecideRequirements(decision) {
+  const ids = [...state.selectedRequirements];
+  if (!ids.length) return;
+  const reason =
+    decision === "reject"
+      ? window.prompt("请输入本批退回原因（会分别写入每条审计记录）：", "")?.trim() || ""
+      : "";
+  if (decision === "reject" && !reason) return;
+  try {
+    const result = await api("/api/requirements/bulk-decision", {
+      method: "POST",
+      body: JSON.stringify({
+        requirement_ids: ids,
+        decision,
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    state.selectedRequirements.clear();
+    await refreshSop(
+      `${result.succeeded} 条需求${decision === "approve" ? "已通过" : "已退回"}${
+        result.failed ? `，${result.failed} 条未处理` : ""
+      }。`,
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function approveContent(poemId) {
+  const poem = poemById(poemId);
+  if (!poem) return;
+  if (!window.confirm(`确认「${poem.title}」正文与来源无误，并推进到需求策划？`)) return;
+  try {
+    await api(`/api/poems/${poemId}/content/approve`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop("内容已批准，可以生成插图需求。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function decideRequirement(requirementId, decision) {
+  let reason = "";
+  if (decision === "reject") {
+    reason = window.prompt("请输入退回原因（将写入审计记录）：", "")?.trim() || "";
+    if (!reason) return;
+  }
+  try {
+    await api(`/api/requirements/${requirementId}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({ reason, actor: ACTOR }),
+    });
+    await refreshSop(decision === "approve" ? "需求已通过，可进入画面策划。" : "需求已退回。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function generateDirections(poemIds) {
+  if (!poemIds.length) return;
+  const regenerating = poemIds.filter((poemId) => (poemById(poemId)?.direction_count || 0) > 0);
+  if (
+    regenerating.length &&
+    !window.confirm(
+      `其中 ${regenerating.length} 首已有方向版本。重新生成会保留锁定字段、创建新版本，并使未投产旧方向退出当前视图。确认继续？`,
+    )
+  ) {
+    return;
+  }
+  setSyncState("loading", `正在策划 ${poemIds.length} 首方向`);
+  try {
+    const result = await api("/api/directions/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        poem_ids: poemIds,
+        preserve_locked: true,
+        actor: ACTOR,
+      }),
+    });
+    state.selectedPoems.clear();
+    await refreshSop(
+      `已为 ${result.succeeded} 首生成三方向${
+        result.failed ? `，${result.failed} 首未通过门禁` : ""
+      }`,
+    );
+    if (result.succeeded) switchView("directions");
+  } catch (error) {
+    setSyncState("error", "方向生成失败");
+    showToast(error.message, "error");
+  }
+}
+
+async function decideDirection(directionId, decision) {
+  let reason = "";
+  if (decision === "reject") {
+    reason = window.prompt("请输入方向退回原因：", "")?.trim() || "";
+    if (!reason) return;
+  }
+  try {
+    await api(`/api/directions/${directionId}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    await refreshSop(decision === "approve" ? "方向已批准，诗词进入待排产。" : "方向已退回。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function bulkDecideDirections(decision) {
+  const ids = [...state.selectedDirections];
+  if (!ids.length) return;
+  const reason =
+    decision === "reject"
+      ? window.prompt("请输入本批方向退回原因（会逐条写入审计记录）：", "")?.trim() || ""
+      : "";
+  if (decision === "reject" && !reason) return;
+  if (
+    decision === "approve" &&
+    !window.confirm(`确认批量批准 ${ids.length} 个已人工核对的方向？系统会逐条写入审计记录。`)
+  ) {
+    return;
+  }
+  try {
+    const result = await api("/api/directions/bulk-decision", {
+      method: "POST",
+      body: JSON.stringify({
+        direction_ids: ids,
+        decision,
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    state.selectedDirections.clear();
+    await refreshSop(
+      `${result.succeeded} 个方向${decision === "approve" ? "已通过" : "已退回"}${
+        result.failed ? `，${result.failed} 个未处理` : ""
+      }。`,
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openDirectionEditor(directionId) {
+  const direction = directionById(directionId);
+  if (!direction) return;
+  const content = direction.content || {};
+  const form = document.querySelector("#direction-form");
+  form.reset();
+  form.elements.direction_id.value = direction.id;
+  [
+    "title",
+    "subject",
+    "shot",
+    "foreground",
+    "midground",
+    "background",
+    "action",
+    "lighting",
+    "palette",
+    "whitespace",
+    "risk_note",
+    "art_director_note",
+  ].forEach((key) => {
+    form.elements[key].value = content[key] || "";
+  });
+  ["preserve", "avoid", "locked_fields"].forEach((key) => {
+    form.elements[key].value = (content[key] || []).join("\n");
+  });
+  document.querySelector("#direction-dialog-title").textContent = `${direction.poem_title} · ${
+    directionTypeMeta[direction.type]?.[0] || direction.type
+  } v${direction.version}`;
+  document.querySelector("#direction-dialog").showModal();
+}
+
+async function saveDirectionRevision(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api(`/api/directions/${data.get("direction_id")}/revise`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: {
+          title: data.get("title"),
+          subject: data.get("subject"),
+          shot: data.get("shot"),
+          foreground: data.get("foreground"),
+          midground: data.get("midground"),
+          background: data.get("background"),
+          action: data.get("action"),
+          lighting: data.get("lighting"),
+          palette: data.get("palette"),
+          whitespace: data.get("whitespace"),
+          preserve: asLines(data.get("preserve")),
+          avoid: asLines(data.get("avoid")),
+          risk_note: data.get("risk_note"),
+          art_director_note: data.get("art_director_note"),
+          locked_fields: asLines(data.get("locked_fields")),
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#direction-dialog").close();
+    await refreshSop(`方向已保存为 v${result.direction.version}，等待重新审核。`);
+    switchView("directions");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function copyDirection(directionId) {
+  if (!window.confirm("复制会创建新的当前版本并回到待审核，确认继续？")) return;
+  try {
+    const result = await api(`/api/directions/${directionId}/copy`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop(`方向已复制为 v${result.direction.version}。`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function disableDirection(directionId) {
+  const reason = window.prompt("请输入停用原因（将写入审计记录）：", "")?.trim() || "";
+  if (!reason) return;
+  try {
+    await api(`/api/directions/${directionId}/disable`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    await refreshSop("方向已停用，不再进入新排产。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openRequirement(poemId) {
+  const poem = poemById(poemId);
+  const requirement = poem?.requirement
+    ? requirementById(poem.requirement.id)
+    : null;
+  if (!requirement) {
+    showToast("这首诗尚未生成需求卡。", "warning");
+    return;
+  }
+  const content = requirement.content || {};
+  document.querySelector("#requirement-id").value = requirement.id;
+  document.querySelector("#requirement-dialog-title").textContent =
+    `${requirement.poem_title} · 需求卡`;
+  document.querySelector("#requirement-dialog-meta").innerHTML = `
+    ${statusBadge(requirement.status, requirementStatusMeta)}
+    <span>版本 v${requirement.version}</span>
+    <span>${escapeHtml(requirement.author)}</span>
+    <span>更新于 ${formatDate(requirement.updated_at)}</span>`;
+  document.querySelector("#requirement-composition").value =
+    content.composition || "";
+  document.querySelector("#requirement-must").value = (content.must_have || []).join("\n");
+  document.querySelector("#requirement-avoid").value = (content.avoid || []).join("\n");
+  document.querySelector("#requirement-note").value = content.editor_note || "";
+  document.querySelector("#requirement-locked-fields").value = (
+    content.locked_fields || []
+  ).join("\n");
+  const form = document.querySelector("#requirement-form");
+  const locked = requirement.status === "approved";
+  form.querySelectorAll("textarea").forEach((field) => {
+    field.disabled = locked;
+  });
+  form.querySelector('button[type="submit"]').hidden = locked;
+  document.querySelector("#requirement-dialog").showModal();
+}
+
+async function saveRequirement(event) {
+  event.preventDefault();
+  const id = document.querySelector("#requirement-id").value;
+  try {
+    await api(`/api/requirements/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        changes: {
+          composition: document.querySelector("#requirement-composition").value.trim(),
+          must_have: asLines(document.querySelector("#requirement-must").value),
+          avoid: asLines(document.querySelector("#requirement-avoid").value),
+          editor_note: document.querySelector("#requirement-note").value.trim(),
+          locked_fields: asLines(
+            document.querySelector("#requirement-locked-fields").value,
+          ),
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#requirement-dialog").close();
+    await refreshSop("需求已保存为新版本，等待重新审核。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openBatchDialog() {
+  const readyPoems = state.sop.poems.filter(
+    (poem) => poem.status === "ready_for_production" && poem.approved_direction_count > 0,
+  );
+  if (!readyPoems.length) {
+    showToast("当前没有通过方向门禁的待排产诗词。", "warning");
+    switchView("directions");
+    return;
+  }
+  const selectedReady = new Set(
+    [...state.selectedPoems].filter((poemId) =>
+      readyPoems.some((poem) => poem.id === poemId),
+    ),
+  );
+  const checkedIds = selectedReady.size
+    ? selectedReady
+    : new Set(readyPoems.map((poem) => poem.id));
+  document.querySelector("#batch-style").innerHTML = publishedStylePacks()
+    .map(
+      (style) =>
+        `<option value="${style.style_id}" ${
+          style.style_id === project().style_id ? "selected" : ""
+        }>${escapeHtml(style.name)} · v${style.version}</option>`,
+    )
+    .join("");
+  document.querySelector("#batch-poem-options").innerHTML = readyPoems
+    .map(
+      (poem) => `<label>
+        <input type="checkbox" value="${poem.id}" ${
+          checkedIds.has(poem.id) ? "checked" : ""
+        } />
+        <span><strong>${escapeHtml(poem.title)}</strong><small>${escapeHtml(
+          poem.author,
+        )} · ${poem.approved_direction_count} 个批准方向</small></span>
+      </label>`,
+    )
+    .join("");
+  document.querySelector("#batch-engine-copy").textContent = `${
+    state.legacy.config.provider === "openai" ? state.legacy.config.model : "本地演示引擎"
+  } · 剩余预算 ${Number(state.sop.budget?.remaining || 0).toFixed(2)} ${
+    state.sop.budget?.currency || "USD"
+  }`;
+  state.batchEstimate = null;
+  document.querySelector("#batch-estimate").hidden = true;
+  document.querySelector("#create-batch-button").disabled = true;
+  document.querySelector("#batch-dialog").showModal();
+}
+
+function batchFormPayload() {
+  const poemIds = [
+    ...document.querySelectorAll("#batch-poem-options input:checked"),
+  ].map((input) => input.value);
+  if (!poemIds.length) throw new Error("请至少选择一首待排产诗词。");
   return {
-    images, candidates: images.filter((item) => item.decision === "candidate").length,
-    selected: images.filter((item) => item.decision === "selected").length,
-    rejected: images.filter((item) => item.decision === "rejected").length,
-    finals: finals.length, covered: new Set(images.map((item) => item.poem_id)).size,
-    completedPoems: new Set(finals.map((item) => item.poem_id)).size,
+    project_id: project().id,
+    poem_ids: poemIds,
+    style_id: document.querySelector("#batch-style").value,
+    aspect_ratio: document.querySelector("#batch-ratio").value,
+    count_per_direction: Number(document.querySelector("#batch-count").value),
+    priority: Number(document.querySelector("#batch-priority").value),
+    name: document.querySelector("#batch-name").value.trim(),
   };
 }
 
-function renderProvider() {
-  const live = Boolean(state.config?.live_generation);
-  document.querySelector("#provider-card").classList.toggle("is-demo", !live);
-  document.querySelector("#provider-label").textContent = live ? `${state.config.model} · 已连接` : "本地演示引擎";
-  document.querySelector("#generate-mode-copy").textContent = live ? `使用 ${state.config.model}，结果会进入评审队列` : "离线演示模式 · 生成结果保存在本机";
-}
-function renderProjectSwitcher() {
-  const select = document.querySelector("#project-switcher");
-  select.innerHTML = state.projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("");
-  select.value = getActiveProject()?.id || "";
-}
-function renderProjectHero() {
-  const project = getActiveProject(); if (!project) return;
-  const metrics = projectMetrics(project); const total = project.poem_ids.length;
-  const progress = total ? Math.round(metrics.completedPoems / total * 100) : 0;
-  document.querySelector("#active-project-name").textContent = project.name;
-  document.querySelector("#active-project-brief").textContent = `${project.purpose} · ${total} 首诗 · ${getStyle(project.style_id)?.name || "待定风格"}`;
-  document.querySelector("#project-progress-bar").style.width = `${progress}%`;
-  document.querySelector("#project-progress-copy").textContent = `${metrics.completedPoems} / ${total} 首完成`;
-  document.querySelector("#project-style-name").textContent = getStyle(project.style_id)?.name || "待定风格";
-}
-function renderStats() {
-  const project = getActiveProject(); if (!project) return;
-  const metrics = projectMetrics(project);
-  document.querySelector("#stat-candidates").textContent = metrics.candidates;
-  document.querySelector("#stat-selected").textContent = metrics.selected;
-  document.querySelector("#stat-poems").textContent = metrics.covered;
-  document.querySelector("#stat-final").textContent = metrics.finals;
-}
-function renderSop() {
-  const project = getActiveProject(); if (!project) return;
-  const metrics = projectMetrics(project); const total = project.poem_ids.length;
-  const hasBaseline = metrics.selected + metrics.finals > 0;
-  const convergedPoems = new Set(metrics.images.filter((item) => item.generation_mode === "converge" && ["selected", "final"].includes(item.decision)).map((item) => item.poem_id)).size;
-  const stages = [
-    { n: "01", title: "定义项目", output: "用途与边界", done: true, action: "查看项目", view: "projects" },
-    { n: "02", title: "建立基线", output: "1 张代表性入选图", done: hasBaseline, action: "评审候选", view: metrics.candidates ? "gallery" : "today" },
-    { n: "03", title: "方向探索", output: `${metrics.covered} / ${total} 首已探索`, done: metrics.covered >= total, action: "生成探索", view: "today" },
-    { n: "04", title: "收敛迭代", output: `${convergedPoems} / ${total} 首有收敛版本`, done: convergedPoems >= total, action: "开始收敛", view: "gallery" },
-    { n: "05", title: "质检交付", output: `${metrics.completedPoems} / ${total} 首可交付`, done: metrics.completedPoems >= total, action: "检查作品", view: "gallery" },
-  ];
-  const firstIncomplete = stages.findIndex((item) => !item.done);
-  const activeIndex = firstIncomplete === -1 ? stages.length - 1 : firstIncomplete;
-  document.querySelector("#sop-rail").innerHTML = stages.map((stage, index) => `<article class="sop-step${stage.done ? " is-done" : ""}${index === activeIndex ? " is-current" : ""}"><div class="sop-step-top"><span>${stage.done ? "✓" : stage.n}</span><small>${stage.done ? "已完成" : index === activeIndex ? "当前阶段" : "待开始"}</small></div><h3>${stage.title}</h3><p>${stage.output}</p><button type="button" data-switch-view="${stage.view}" ${index > activeIndex + 1 ? "disabled" : ""}>${stage.action} →</button></article>`).join("");
+function renderBatchEstimate(estimate) {
+  const container = document.querySelector("#batch-estimate");
+  container.hidden = false;
+  container.innerHTML = `
+    <div class="batch-estimate-grid">
+      <span><strong>${estimate.poem_count}</strong><small>首诗</small></span>
+      <span><strong>${estimate.direction_count}</strong><small>批准方向</small></span>
+      <span><strong>${estimate.task_count}</strong><small>生成任务</small></span>
+      <span><strong>${Number(estimate.estimated_cost).toFixed(2)}</strong><small>${escapeHtml(
+        estimate.currency,
+      )} 预计成本</small></span>
+      <span><strong>${Number(estimate.budget.remaining).toFixed(2)}</strong><small>剩余预算</small></span>
+    </div>
+    <div class="import-verdict ${
+      estimate.can_start ? "is-ready" : "is-blocked"
+    }">
+      <strong>${
+        estimate.can_start ? "✓ 预算门禁通过" : "× 预计成本超过剩余预算"
+      }</strong>
+      <span>${escapeHtml(
+        estimate.warnings?.join("；") ||
+          "启动后将按优先级进入持久队列，页面关闭不影响任务状态。",
+      )}</span>
+    </div>`;
+  document.querySelector("#create-batch-button").disabled = false;
+  document.querySelector("#create-batch-button").textContent = estimate.can_start
+    ? "创建并启动"
+    : "创建预算阻塞草稿";
 }
 
-function renderPoemSelect() {
-  const project = getActiveProject(); const select = document.querySelector("#poem-select");
-  const allowed = project ? state.poems.filter((poem) => project.poem_ids.includes(poem.id)) : state.poems;
-  const previous = select.value;
-  select.innerHTML = allowed.map((poem) => `<option value="${escapeHtml(poem.id)}">${escapeHtml(poem.title)} · ${escapeHtml(poem.author)}</option>`).join("");
-  if (allowed.some((item) => item.id === previous)) select.value = previous;
-  updatePoemPreview();
-}
-function renderStyleSelects() {
-  const project = getActiveProject();
-  for (const id of ["style-select", "project-style"]) {
-    const select = document.querySelector(`#${id}`); if (!select) continue;
-    select.innerHTML = state.styles.map((style) => `<option value="${escapeHtml(style.id)}">${escapeHtml(style.name)}</option>`).join("");
+async function estimateBatch(event) {
+  event.preventDefault();
+  try {
+    const payload = batchFormPayload();
+    const estimate = await api("/api/batches/estimate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.batchEstimate = estimate;
+    renderBatchEstimate(estimate);
+  } catch (error) {
+    state.batchEstimate = null;
+    document.querySelector("#create-batch-button").disabled = true;
+    showToast(error.message, "error");
   }
-  if (project) { document.querySelector("#style-select").value = project.style_id; document.querySelector("#ratio-select").value = project.aspect_ratio; }
-  updateDirectionVisual();
-}
-function updatePoemPreview() {
-  const poem = getPoem(document.querySelector("#poem-select").value); if (!poem) return;
-  document.querySelector("#poem-preview").innerHTML = `<div class="poem-preview-lines">${poem.lines.map(escapeHtml).join("<br>")}</div><div class="poem-preview-meta"><strong>${escapeHtml(poem.theme)} · ${escapeHtml(poem.mood)}</strong>${escapeHtml(poem.visual_brief)}</div>`;
-  document.querySelector("#direction-title").textContent = poem.imagery.slice(0, 2).join(" · ");
-  document.querySelector("#direction-copy").textContent = poem.visual_brief;
-  document.querySelector("#direction-tags").innerHTML = poem.imagery.slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
-  renderParentOptions();
-}
-function updateDirectionVisual() {
-  const style = getStyle(document.querySelector("#style-select")?.value); const visual = document.querySelector("#art-direction-visual");
-  if (!style || !visual) return;
-  visual.style.background = `linear-gradient(180deg, ${style.palette[0]} 0%, ${style.palette[1]} 62%, ${style.foreground} 100%)`;
-  visual.querySelector(".visual-moon").style.background = style.accent;
-  visual.querySelector(".ridge-one").style.background = style.palette[2] || style.foreground;
-  visual.querySelector(".ridge-two").style.background = style.foreground;
-}
-function renderParentOptions(preferredId = null) {
-  const poemId = document.querySelector("#poem-select")?.value;
-  const options = activeImages().filter((image) => image.poem_id === poemId && ["selected", "final"].includes(image.decision) && (!state.config?.live_generation || /\.(png|jpe?g|webp)$/i.test(image.url)));
-  const select = document.querySelector("#parent-image-select"); if (!select) return;
-  select.innerHTML = `<option value="">${options.length ? "请选择父候选" : "暂无入选候选，请先完成探索评审"}</option>${options.map((image, index) => `<option value="${image.id}">${decisionNames[image.decision]} · ${image.style_name} · 版本 ${index + 1}</option>`).join("")}`;
-  if (preferredId && options.some((item) => item.id === preferredId)) select.value = preferredId;
-}
-function updateModeUI(mode = state.generationMode) {
-  state.generationMode = mode;
-  const converge = mode === "converge";
-  document.querySelector("#converge-fieldset").hidden = !converge;
-  document.querySelector("#settings-step-number").textContent = converge ? "03" : "02";
-  document.querySelector("#direction-label").innerHTML = converge ? "明确修改项 <small>必填</small>" : "补充探索要求 <small>可选</small>";
-  document.querySelector("#custom-note").placeholder = converge ? "例如：保留人物与光影，只缩小月亮并增加江面留白…" : "例如：同一诗意分别尝试远景、主体叙事与意象留白…";
-  document.querySelector("#generate-button-title").textContent = converge ? "生成收敛版本" : "生成探索候选";
-  document.querySelector("#art-director-note").textContent = converge ? "收敛阶段只处理已说明的问题，避免同时改变构图、人物与色彩。" : "探索阶段应优先拉开构图差异，不追求微小细节变化。";
 }
 
-function artCardMarkup(image) {
-  const mode = image.generation_mode === "converge" ? "收敛" : "探索";
-  return `<article class="art-card decision-${escapeHtml(image.decision || "candidate")}" data-image-id="${image.id}"><button class="art-card-image" type="button" data-open-image="${image.id}" aria-label="评审${escapeHtml(image.poem_title)}候选"><span class="art-card-badge">${mode} · ${escapeHtml(image.style_name)}</span><img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.poem_title)}插图" loading="lazy" /></button><div class="decision-strip"><span>${decisionNames[image.decision] || "待评审"}</span>${image.parent_image_id ? "<small>衍生版本</small>" : "<small>初始候选</small>"}</div><div class="art-card-copy"><div><h3>${escapeHtml(image.poem_title)}</h3><p>${escapeHtml(image.author)} · ${escapeHtml(image.project_name || "默认项目")}</p></div><time>${formatDate(image.created_at)}</time></div></article>`;
+async function createAndStartBatch() {
+  if (!state.batchEstimate) return;
+  let batch;
+  try {
+    batch = (
+      await api("/api/batches", {
+        method: "POST",
+        body: JSON.stringify({ ...batchFormPayload(), actor: ACTOR }),
+      })
+    ).batch;
+    try {
+      await api(`/api/batches/${batch.id}/start`, {
+        method: "POST",
+        body: JSON.stringify({ actor: ACTOR }),
+      });
+      showToast(`批次已启动，共 ${batch.task_count} 个任务。`);
+    } catch (startError) {
+      showToast(`批次已创建，但未启动：${startError.message}`, "warning");
+    }
+    document.querySelector("#batch-dialog").close();
+    document.querySelector("#batch-form").reset();
+    state.batchEstimate = null;
+    state.selectedPoems.clear();
+    await loadData({ quiet: true });
+    switchView("queue");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
 }
-function renderRecent() {
-  const images = activeImages().filter((item) => item.decision === "candidate").slice(0, 6);
-  document.querySelector("#recent-grid").innerHTML = images.length ? images.map(artCardMarkup).join("") : `<div class="inline-empty">当前没有待评审候选。可以开始新一轮探索，或去画廊查看已入选作品。</div>`;
+
+async function runBatchAction(batchId, action) {
+  const body = { actor: ACTOR };
+  if (action === "cancel" && !window.confirm("确认取消此批次中尚未开始的任务？")) {
+    return;
+  }
+  if (action === "retry-failed") {
+    const hasUnknown = state.sop.tasks.some(
+      (task) =>
+        task.batch_id === batchId &&
+        task.status === "blocked" &&
+        task.last_error_code === "OUTCOME_UNKNOWN",
+    );
+    if (
+      hasUnknown &&
+      !window.confirm("存在结果未知任务。请确认已核对外部账单与生成资产，仍要重新调用吗？")
+    ) {
+      return;
+    }
+    body.confirm_unknown = hasUnknown;
+  }
+  try {
+    await api(`/api/batches/${batchId}/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    await loadData({ quiet: true });
+    showToast(
+      {
+        start: "批次已启动。",
+        pause: "已停止领取新任务，当前任务完成后暂停。",
+        resume: "批次已继续运行。",
+        cancel: "未开始任务已取消。",
+        "retry-failed": "失败任务已重新进入队列。",
+      }[action] || "批次状态已更新。",
+    );
+  } catch (error) {
+    await loadData({ quiet: true });
+    showToast(error.message, error.code === "BUDGET_BLOCKED" ? "warning" : "error");
+  }
 }
-function renderGallery() {
-  const activeProjectId = getActiveProject()?.id;
-  const images = state.images.filter((image) => {
-    if (image.hidden) return false;
-    if (state.projectFilter === "active" && image.project_id !== activeProjectId) return false;
-    if (state.projectFilter !== "active" && state.projectFilter !== "all" && image.project_id !== state.projectFilter) return false;
-    if (state.decisionFilter !== "all" && image.decision !== state.decisionFilter) return false;
-    if (state.styleFilter !== "all" && image.style_id !== state.styleFilter) return false;
-    return true;
+
+function parseImportRecords() {
+  const raw = document.querySelector("#import-json").value.trim();
+  if (!raw) throw new Error("请选择 JSON 文件或粘贴诗词数据。");
+  let records;
+  try {
+    records = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`JSON 格式错误：${error.message}`);
+  }
+  if (!Array.isArray(records)) throw new Error("导入内容必须是 JSON 数组。");
+  return records;
+}
+
+function renderImportPreview(preview) {
+  const result = document.querySelector("#import-result");
+  result.hidden = false;
+  const counts = preview.counts;
+  const issues = preview.items.filter(
+    (item) => item.status === "invalid" || item.status === "conflict" || item.warnings.length,
+  );
+  result.innerHTML = `
+    <div class="import-metrics">
+      <span><strong>${counts.total}</strong> 总记录</span>
+      <span><strong>${counts.new}</strong> 新增</span>
+      <span><strong>${counts.unchanged}</strong> 未变化</span>
+      <span class="${counts.conflict ? "has-error" : ""}"><strong>${counts.conflict}</strong> 冲突</span>
+      <span class="${counts.invalid ? "has-error" : ""}"><strong>${counts.invalid}</strong> 无效</span>
+      <span class="${counts.warnings ? "has-warning" : ""}"><strong>${counts.warnings}</strong> 警告</span>
+    </div>
+    <div class="import-verdict ${preview.can_commit ? "is-ready" : "is-blocked"}">
+      <strong>${preview.can_commit ? "✓ 预检通过，可以提交" : "× 预检未通过，不能提交"}</strong>
+      <span>${preview.can_commit ? "提交只会新增记录，不覆盖已有诗词。" : "请先处理无效字段或正文冲突。"}</span>
+    </div>
+    ${
+      issues.length
+        ? `<div class="import-issues">${issues
+            .slice(0, 30)
+            .map(
+              (item) => `<article>
+                <div><strong>${escapeHtml(item.title || `第 ${item.index + 1} 条`)}</strong><span>${escapeHtml(item.id)}</span></div>
+                <span class="issue-status status-${item.status}">${escapeHtml(item.status)}</span>
+                <p>${escapeHtml(
+                  [
+                    ...(item.errors || []),
+                    ...(item.warnings || []),
+                    item.conflict_fields?.length
+                      ? `冲突字段：${item.conflict_fields.join("、")}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join("；"),
+                )}</p>
+              </article>`,
+            )
+            .join("")}</div>`
+        : ""
+    }`;
+  document.querySelector("#commit-import-button").disabled = !preview.can_commit;
+}
+
+async function previewImport(event) {
+  event.preventDefault();
+  try {
+    state.importRecords = parseImportRecords();
+    const preview = await api(`/api/projects/${project().id}/poems/import`, {
+      method: "POST",
+      body: JSON.stringify({ records: state.importRecords, commit: false }),
+    });
+    state.importPreview = preview;
+    renderImportPreview(preview);
+  } catch (error) {
+    state.importPreview = null;
+    document.querySelector("#commit-import-button").disabled = true;
+    showToast(error.message, "error");
+  }
+}
+
+async function commitImport() {
+  if (!state.importPreview?.can_commit || !state.importRecords) return;
+  try {
+    const result = await api(`/api/projects/${project().id}/poems/import`, {
+      method: "POST",
+      body: JSON.stringify({
+        records: state.importRecords,
+        commit: true,
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#import-dialog").close();
+    state.importRecords = null;
+    state.importPreview = null;
+    document.querySelector("#import-form").reset();
+    document.querySelector("#import-result").hidden = true;
+    document.querySelector("#commit-import-button").disabled = true;
+    await refreshSop(`已导入 ${result.imported} 首诗词，${result.unchanged} 首保持不变。`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function decideImage(imageId, decision) {
+  try {
+    const payload = await api(`/api/images/${imageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ decision }),
+    });
+    const index = state.legacy.images.findIndex((item) => item.id === imageId);
+    if (index >= 0) state.legacy.images[index] = payload.image;
+    renderChrome();
+    renderOverview();
+    renderReview();
+    renderAssets();
+    showToast(decision === "selected" ? "候选已入选方向。" : "候选已淘汰。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openLegacyImage(imageId) {
+  const image = state.legacy.images.find((item) => item.id === imageId);
+  if (!image) return;
+  state.currentImageId = imageId;
+  document.querySelector("#image-dialog-title").textContent = image.poem_title;
+  const preview = document.querySelector("#image-dialog-preview");
+  preview.src = image.url;
+  preview.alt = `${image.poem_title}插图`;
+  const qcDone = Object.values(image.qc || {}).filter(Boolean).length;
+  document.querySelector("#image-dialog-copy").innerHTML = `
+    <span class="status-pill">${escapeHtml(image.style_name)}</span>
+    <h3>${escapeHtml(image.poem_title)} · ${escapeHtml(image.author)}</h3>
+    <p>${image.generation_mode === "converge" ? "收敛返工" : "方向探索"} · ${
+      image.parent_image_id ? "有父候选" : "初始候选"
+    } · ${formatDate(image.created_at)}</p>
+    <dl>
+      <div><dt>项目</dt><dd>${escapeHtml(image.project_name)}</dd></div>
+      <div><dt>评审状态</dt><dd>${escapeHtml(image.decision)}</dd></div>
+      <div><dt>质检进度</dt><dd>${qcDone} / 5</dd></div>
+      <div><dt>生成引擎</dt><dd>${escapeHtml(image.provider)}</dd></div>
+    </dl>
+    <details><summary>查看生成提示词</summary><p>${escapeHtml(image.prompt)}</p></details>
+    <div class="dialog-review-actions">
+      <button class="danger-button" type="button" data-image-action="rejected" data-image-id="${
+        image.id
+      }">淘汰候选</button>
+      <button class="approve-button" type="button" data-image-action="selected" data-image-id="${
+        image.id
+      }">入选方向</button>
+    </div>`;
+  if (!document.querySelector("#image-dialog").open) {
+    document.querySelector("#image-dialog").showModal();
+  }
+}
+
+function openProductionImage(imageId) {
+  const image = productionImageById(imageId);
+  if (!image) return;
+  const qc = image.qc || {};
+  const finalApprovals = image.final_approvals || {};
+  const promptSegments = image.prompt_segments || {};
+  const contentSource = promptSegments.content || {};
+  const requirementSource = promptSegments.requirement || {};
+  const directionSource = promptSegments.direction || {};
+  const styleSource = promptSegments.style || {};
+  const instructionSource = promptSegments.instruction || {};
+  const blocked = ["qc_blocked", "needs_manual_qc"].includes(image.status);
+  state.currentImageId = imageId;
+  document.querySelector("#image-dialog-title").textContent = `${image.poem_title} · 候选审片`;
+  const preview = document.querySelector("#image-dialog-preview");
+  preview.src = image.url;
+  preview.alt = `${image.poem_title}插图`;
+  document.querySelector("#image-dialog-copy").innerHTML = `
+    <div class="review-dialog-status">
+      ${statusBadge(image.status, productionImageStatusMeta)}
+      <strong>QC ${Math.round(Number(qc.score || 0))}</strong>
+      <span>${escapeHtml(qc.version || "无版本")}</span>
+    </div>
+    <h3>${escapeHtml(image.poem_title)} · ${escapeHtml(image.author)}</h3>
+    <p>${escapeHtml(directionTypeMeta[image.direction_type]?.[0] || image.direction_type)} · 第 ${
+      image.generation
+    } 代 · ${formatDate(image.created_at)}</p>
+    <dl>
+      <div><dt>生产批次</dt><dd>${escapeHtml(image.batch_name)}</dd></div>
+      <div><dt>风格 / 引擎</dt><dd>${escapeHtml(image.style_id)} · ${escapeHtml(
+        image.provider,
+      )}</dd></div>
+      <div><dt>文件规格</dt><dd>${image.width}×${image.height} · ${escapeHtml(
+        image.mime_type,
+      )}</dd></div>
+      <div><dt>谱系</dt><dd>第 ${image.generation} 代 · ${image.child_count} 个子候选</dd></div>
+    </dl>
+    <section class="source-trace-panel">
+      <div class="source-trace-head"><strong>生产证据链</strong><span>${escapeHtml(
+        image.prompt_template_version || "旧版 Prompt",
+      )}</span></div>
+      <div class="source-trace-grid">
+        <article><small>诗文版本</small><strong>v${escapeHtml(
+          contentSource.content_version || "—",
+        )}</strong><span>${escapeHtml(contentSource.content_version_id || "未记录")}</span></article>
+        <article><small>需求版本</small><strong>v${escapeHtml(
+          requirementSource.version || "—",
+        )}</strong><span>${escapeHtml(requirementSource.id || "未记录")}</span></article>
+        <article><small>方向版本</small><strong>v${escapeHtml(
+          directionSource.version || "—",
+        )}</strong><span>${escapeHtml(directionSource.id || image.direction_id || "未记录")}</span></article>
+        <article><small>风格版本</small><strong>v${escapeHtml(
+          styleSource.version || "—",
+        )}</strong><span>${escapeHtml(styleSource.version_id || image.style_version_id || "未记录")}</span></article>
+        <article><small>指令版本</small><strong>v${escapeHtml(
+          instructionSource.version || "—",
+        )}</strong><span>${escapeHtml(instructionSource.id || "未记录")}</span></article>
+      </div>
+      <code title="Prompt SHA-256">SHA-256 · ${escapeHtml(
+        image.prompt_hash || "旧数据未记录哈希",
+      )}</code>
+    </section>
+    <section class="qc-detail ${blocked ? "is-blocked" : ""}">
+      <div><strong>自动 QC</strong><span>${escapeHtml(qc.status || "未执行")}</span></div>
+      <ul>
+        ${(qc.hard_failures || [])
+          .map((item) => `<li class="is-danger">硬失败 · ${escapeHtml(item)}</li>`)
+          .join("")}
+        ${(qc.warnings || [])
+          .map((item) => `<li>需人工确认 · ${escapeHtml(item)}</li>`)
+          .join("")}
+      </ul>
+      ${
+        qc.duplicate_of
+          ? `<p>相似候选：${escapeHtml(qc.duplicate_of.slice(-8))}</p>`
+          : ""
+      }
+    </section>
+    <details><summary>查看冻结的六段式 Prompt</summary><p>${escapeHtml(
+      [
+        `Prompt hash：${image.prompt_hash || "未记录"}`,
+        `模板：${image.prompt_template_version || "未记录"}`,
+        "",
+        image.prompt || "",
+      ].join("\n"),
+    )}</p></details>
+    ${
+      image.status === "final_candidate"
+        ? `<section class="final-gate-panel">
+            <div><strong>双终审门禁</strong><span>内容与美术均通过后自动锁定成品</span></div>
+            <article>
+              <span>内容终审</span>
+              ${statusBadge(
+                finalApprovals.content?.decision || "pending",
+                {
+                  pending: ["待审核", "warning"],
+                  approved: ["已通过", "success"],
+                  rejected: ["已退回", "danger"],
+                },
+              )}
+              <div data-role-allow="content_editor,producer,system_admin"><button class="secondary-button" type="button" data-final-reviewer="content" data-final-decision="approved" data-image-id="${image.id}">内容通过</button><button class="danger-button" type="button" data-final-reviewer="content" data-final-decision="rejected" data-image-id="${image.id}">退回</button></div>
+            </article>
+            <article>
+              <span>美术终审</span>
+              ${statusBadge(
+                finalApprovals.art?.decision || "pending",
+                {
+                  pending: ["待审核", "warning"],
+                  approved: ["已通过", "success"],
+                  rejected: ["已退回", "danger"],
+                },
+              )}
+              <div data-role-allow="art_director,producer,system_admin"><button class="secondary-button" type="button" data-final-reviewer="art" data-final-decision="approved" data-image-id="${image.id}">美术通过</button><button class="danger-button" type="button" data-final-reviewer="art" data-final-decision="rejected" data-image-id="${image.id}">退回</button></div>
+            </article>
+          </section>`
+        : ""
+    }
+    <div class="review-decision-form">
+      <label><span>结构化理由</span><select class="dialog-select" id="review-reason-tag">
+        <option value="">选择理由后再决策</option>
+        <option>诗意准确</option><option>构图最佳</option><option>风格一致</option>
+        <option>主体异常</option><option>历史风险</option><option>文字或水印</option>
+        <option>重复构图</option><option>画质问题</option><option>其他</option>
+      </select></label>
+      <label><span>评审备注 / QC 覆盖原因</span><textarea id="review-decision-note" rows="3" placeholder="说明保留、淘汰或人工覆盖的依据"></textarea></label>
+    </div>
+    <div class="dialog-review-actions production-review-actions" data-role-allow="art_director,producer,system_admin">
+      ${
+        blocked
+          ? `<button class="approve-button" type="button" data-qc-override="pass" data-image-id="${image.id}">人工复核通过</button>`
+          : `<button class="danger-button" type="button" data-production-decision="rejected" data-image-id="${image.id}">X 淘汰</button>
+             <button class="secondary-button" type="button" data-open-rework="${image.id}">R 返工</button>
+             <button class="approve-button" type="button" data-production-decision="selected" data-image-id="${image.id}">S 入选</button>
+             <button class="primary-button" type="button" data-production-decision="final_candidate" data-image-id="${image.id}">F 终审候选</button>`
+      }
+    </div>
+    <small class="shortcut-hint">J / K 上下张 · S 入选 · X 淘汰 · F 终审候选 · R 返工</small>`;
+  applyRoleVisibility();
+  if (!document.querySelector("#image-dialog").open) {
+    document.querySelector("#image-dialog").showModal();
+  }
+}
+
+function openImage(imageId) {
+  if (productionImageById(imageId)) openProductionImage(imageId);
+  else openLegacyImage(imageId);
+}
+
+async function sendReviewDecision(imageId, decision) {
+  const reason = document.querySelector("#review-reason-tag")?.value || "";
+  const note = document.querySelector("#review-decision-note")?.value.trim() || "";
+  if (decision !== "candidate" && !reason) {
+    showToast("请先选择结构化审片理由。", "warning");
+    return;
+  }
+  try {
+    await api(`/api/images/${imageId}/decision`, {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        reason_tags: reason ? [reason] : [],
+        note,
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#image-dialog").close();
+    state.reviewSelection.delete(imageId);
+    await refreshSop(
+      {
+        selected: "候选已入选。",
+        rejected: "候选已淘汰，决策已留痕。",
+        final_candidate: "已进入终审候选。",
+        candidate: "已撤回为待审候选。",
+      }[decision],
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function overrideProductionQc(imageId, decision) {
+  const reason = document.querySelector("#review-decision-note")?.value.trim() || "";
+  if (!reason) {
+    showToast("人工覆盖必须在备注中说明核对依据。", "warning");
+    return;
+  }
+  try {
+    await api(`/api/images/${imageId}/qc-override`, {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#image-dialog").close();
+    await refreshSop("人工 QC 覆盖已记录，原自动结果保持不变。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function submitFinalApproval(imageId, reviewerType, decision = "approved") {
+  const reason = document.querySelector("#review-decision-note")?.value.trim() || "";
+  const label = reviewerType === "content" ? "内容终审" : "美术终审";
+  if (decision === "rejected" && !reason) {
+    showToast("终审退回前请在备注中填写原因。", "warning");
+    return;
+  }
+  if (
+    !window.confirm(
+      `确认${label}${decision === "approved" ? "通过" : "退回"}？该操作会写入不可变审计记录。`,
+    )
+  ) {
+    return;
+  }
+  try {
+    const result = await api(`/api/images/${imageId}/finalize`, {
+      method: "POST",
+      body: JSON.stringify({
+        reviewer_type: reviewerType,
+        decision,
+        reason,
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#image-dialog").close();
+    await refreshSop(
+      result.locked
+        ? "内容与美术终审均已通过，成品版本已锁定。"
+        : `${label}结论已记录，等待另一角色终审。`,
+    );
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openRework(imageId) {
+  const image = productionImageById(imageId);
+  if (!image) return;
+  document.querySelector("#rework-image-id").value = imageId;
+  document.querySelector("#rework-dialog-title").textContent = `${image.poem_title} · 创建返工单`;
+  document.querySelector("#rework-preserve").value = (image.direction?.preserve || []).join("\n");
+  document.querySelector("#rework-change").value = "";
+  document.querySelector("#rework-avoid").value = (image.direction?.avoid || []).join("\n");
+  document.querySelector("#rework-note").value = "";
+  document.querySelector("#image-dialog").close();
+  document.querySelector("#rework-dialog").showModal();
+}
+
+async function submitRework(event) {
+  event.preventDefault();
+  const imageId = document.querySelector("#rework-image-id").value;
+  try {
+    await api(`/api/images/${imageId}/rework`, {
+      method: "POST",
+      body: JSON.stringify({
+        preserve: asLines(document.querySelector("#rework-preserve").value),
+        change: asLines(document.querySelector("#rework-change").value),
+        avoid: asLines(document.querySelector("#rework-avoid").value),
+        note: document.querySelector("#rework-note").value.trim(),
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#rework-dialog").close();
+    await refreshSop("返工单已创建，保持项、修改项和禁止项均已留痕。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openComparison() {
+  const images = [...state.reviewSelection]
+    .map((imageId) => productionImageById(imageId))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (images.length < 2) return;
+  document.querySelector("#compare-grid").innerHTML = images
+    .map(
+      (image) => `<article>
+        <button type="button" data-open-image="${image.id}" data-close-compare><img src="${escapeHtml(
+          image.url,
+        )}" alt="${escapeHtml(image.poem_title)}候选" /></button>
+        <div><strong>${escapeHtml(image.poem_title)} · ${escapeHtml(
+          directionTypeMeta[image.direction_type]?.[0] || image.direction_type,
+        )}</strong><span>QC ${Math.round(Number(image.qc?.score || 0))} · 第 ${
+          image.generation
+        } 代</span>${statusBadge(image.status, productionImageStatusMeta)}</div>
+      </article>`,
+    )
+    .join("");
+  document.querySelector("#compare-dialog").showModal();
+}
+
+async function exportFinalAssets() {
+  try {
+    const estimate = await api("/api/exports/estimate", {
+      method: "POST",
+      body: JSON.stringify({ project_id: project().id }),
+    });
+    if (!estimate.can_export) {
+      showToast("导出预检未通过，请先检查成品文件。", "error");
+      return;
+    }
+    if (
+      !window.confirm(
+        `将导出 ${estimate.asset_count} 个当前成品及完整 Manifest，确认继续？`,
+      )
+    ) {
+      return;
+    }
+    const result = await api("/api/exports", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        actor: ACTOR,
+      }),
+    });
+    await refreshSop(`交付包 ${result.package.name} 已生成，历史导出未被覆盖。`);
+    switchView("assets");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function handlePoemAction(action, poemId) {
+  if (action === "approve-content") return approveContent(poemId);
+  if (action === "generate-requirement") return generateRequirements([poemId]);
+  if (action === "open-requirement") {
+    switchView("requirements");
+    return openRequirement(poemId);
+  }
+  if (action === "generate-direction") return generateDirections([poemId]);
+  if (action === "open-directions") return switchView("directions");
+  if (action === "open-queue") return switchView("queue");
+  if (action === "open-review") return switchView("review");
+  return switchView("overview");
+}
+
+document.addEventListener("click", (event) => {
+  const viewButton = event.target.closest("[data-view]");
+  if (viewButton) switchView(viewButton.dataset.view);
+
+  const switchButton = event.target.closest("[data-switch-view]");
+  if (switchButton) switchView(switchButton.dataset.switchView);
+
+  const poemDetail = event.target.closest("[data-open-poem-detail]");
+  if (poemDetail) openPoemDetail(poemDetail.dataset.openPoemDetail);
+
+  const actionButton = event.target.closest("[data-action]");
+  if (actionButton) {
+    const action = actionButton.dataset.action;
+    if (action === "generate-selected-requirements") {
+      generateRequirements(selectedIdsOrWarn());
+    } else if (action === "generate-selected-directions") {
+      generateDirections(selectedIdsOrWarn());
+    } else if (action === "select-requirement-drafts") {
+      state.selectedPoems = new Set(
+        state.sop.poems
+          .filter((poem) => poem.status === "requirement_draft")
+          .map((poem) => poem.id),
+      );
+      renderPoemTable();
+      renderRequirements();
+      showToast(`已选择 ${state.selectedPoems.size} 首待生成需求的诗词。`);
+    } else if (action === "select-direction-drafts") {
+      state.selectedPoems = new Set(
+        state.sop.poems
+          .filter((poem) => poem.status === "direction_draft")
+          .map((poem) => poem.id),
+      );
+      renderPoemTable();
+      showToast(`已选择 ${state.selectedPoems.size} 首待策划诗词。`);
+    } else if (action === "select-requirement-reviews") {
+      state.selectedRequirements = new Set(
+        state.sop.requirements
+          .filter((item) => item.status === "in_review")
+          .map((item) => item.id),
+      );
+      renderRequirements();
+    } else if (action === "select-direction-reviews") {
+      state.selectedDirections = new Set(
+        state.sop.directions
+          .filter((item) => item.status === "in_review")
+          .map((item) => item.id),
+      );
+      renderDirections();
+    } else if (action === "bulk-approve-requirements") {
+      bulkDecideRequirements("approve");
+    } else if (action === "bulk-reject-requirements") {
+      bulkDecideRequirements("reject");
+    } else if (action === "bulk-approve-directions") {
+      bulkDecideDirections("approve");
+    } else if (action === "bulk-reject-directions") {
+      bulkDecideDirections("reject");
+    }
+  }
+
+  const poemAction = event.target.closest("[data-poem-action]");
+  if (poemAction) {
+    handlePoemAction(poemAction.dataset.poemAction, poemAction.dataset.poemId);
+  }
+
+  const requirementAction = event.target.closest("[data-requirement-action]");
+  if (requirementAction) {
+    const requirement = requirementById(requirementAction.dataset.requirementId);
+    if (!requirement) return;
+    if (requirementAction.dataset.requirementAction === "edit") {
+      openRequirement(requirement.poem_id);
+    } else {
+      decideRequirement(
+        requirement.id,
+        requirementAction.dataset.requirementAction,
+      );
+    }
+  }
+
+  const regenerate = event.target.closest("[data-regenerate-requirement]");
+  if (regenerate) regenerateRequirement(regenerate.dataset.regenerateRequirement);
+
+  const directionAction = event.target.closest("[data-direction-action]");
+  if (directionAction) {
+    decideDirection(
+      directionAction.dataset.directionId,
+      directionAction.dataset.directionAction,
+    );
+  }
+
+  const directionEdit = event.target.closest("[data-edit-direction]");
+  if (directionEdit) openDirectionEditor(directionEdit.dataset.editDirection);
+
+  const directionCopy = event.target.closest("[data-copy-direction]");
+  if (directionCopy) copyDirection(directionCopy.dataset.copyDirection);
+
+  const directionDisable = event.target.closest("[data-disable-direction]");
+  if (directionDisable) disableDirection(directionDisable.dataset.disableDirection);
+
+  const batchAction = event.target.closest("[data-batch-action]");
+  if (batchAction) {
+    runBatchAction(batchAction.dataset.batchId, batchAction.dataset.batchAction);
+  }
+
+  const filterButton = event.target.closest("[data-requirement-filter]");
+  if (filterButton) {
+    state.requirementFilter = filterButton.dataset.requirementFilter;
+    renderRequirements();
+  }
+
+  const imageAction = event.target.closest("[data-image-action]");
+  if (imageAction) {
+    decideImage(imageAction.dataset.imageId, imageAction.dataset.imageAction);
+    document.querySelector("#image-dialog").close();
+  }
+
+  const productionDecision = event.target.closest("[data-production-decision]");
+  if (productionDecision) {
+    sendReviewDecision(
+      productionDecision.dataset.imageId,
+      productionDecision.dataset.productionDecision,
+    );
+  }
+
+  const qcOverride = event.target.closest("[data-qc-override]");
+  if (qcOverride) {
+    overrideProductionQc(qcOverride.dataset.imageId, qcOverride.dataset.qcOverride);
+  }
+
+  const finalApproval = event.target.closest("[data-final-reviewer]");
+  if (finalApproval) {
+    submitFinalApproval(
+      finalApproval.dataset.imageId,
+      finalApproval.dataset.finalReviewer,
+      finalApproval.dataset.finalDecision,
+    );
+  }
+
+  const reworkButton = event.target.closest("[data-open-rework]");
+  if (reworkButton) openRework(reworkButton.dataset.openRework);
+
+  if (event.target.closest("[data-create-backup]")) createProductionBackup();
+
+  const verifyBackup = event.target.closest("[data-verify-backup]");
+  if (verifyBackup) verifyProductionBackup(verifyBackup.dataset.verifyBackup);
+
+  const publishInstruction = event.target.closest("[data-publish-instruction]");
+  if (publishInstruction) {
+    publishInstructionVersion(publishInstruction.dataset.publishInstruction);
+  }
+
+  const cloneInstruction = event.target.closest("[data-clone-instruction]");
+  if (cloneInstruction) openInstructionDialog(cloneInstruction.dataset.cloneInstruction);
+
+  const diffInstruction = event.target.closest("[data-diff-instruction]");
+  if (diffInstruction) openInstructionDiff(diffInstruction.dataset.diffInstruction);
+
+  const retireInstruction = event.target.closest("[data-retire-instruction]");
+  if (retireInstruction) {
+    retireInstructionVersion(retireInstruction.dataset.retireInstruction);
+  }
+
+  const publishStyle = event.target.closest("[data-publish-style]");
+  if (publishStyle) publishStyleVersion(publishStyle.dataset.publishStyle);
+
+  const anomaly = event.target.closest("[data-anomaly-view]");
+  if (anomaly) {
+    const view = anomaly.dataset.anomalyView;
+    const filter = anomaly.dataset.anomalyFilter || "";
+    if (view === "queue") {
+      state.queueTaskFilter = filter;
+      refreshTaskPage({ offset: 0 });
+    } else if (view === "review") {
+      state.reviewShowBlocked = true;
+      document.querySelector("#review-show-blocked").checked = true;
+      renderReview();
+    } else if (view === "overview" && filter === "blocked") {
+      state.poemStatus = "blocked";
+      document.querySelector("#poem-status-filter").value = "blocked";
+      renderPoemTable();
+    } else if (view === "requirements" && filter === "failed") {
+      state.requirementFilter = "failed";
+      renderRequirements();
+    }
+    switchView(view);
+  }
+
+  if (event.target.closest("[data-clear-queue-filter]")) {
+    state.queueTaskFilter = "";
+    state.queueBatchFilter = "";
+    state.queueErrorFilter = "";
+    state.queueTaskQuery = "";
+    refreshTaskPage({ offset: 0 });
+  }
+
+  const taskPageButton = event.target.closest("[data-task-page-offset]");
+  if (taskPageButton && !taskPageButton.disabled) {
+    refreshTaskPage({ offset: Number(taskPageButton.dataset.taskPageOffset || 0) });
+  }
+
+  const imageOpen = event.target.closest("[data-open-image]");
+  if (imageOpen) {
+    if (imageOpen.closest("#compare-dialog")) {
+      document.querySelector("#compare-dialog").close();
+    }
+    openImage(imageOpen.dataset.openImage);
+  }
+
+  const close = event.target.closest("[data-close-dialog]");
+  if (close) close.closest("dialog")?.close();
+});
+
+document.addEventListener("change", (event) => {
+  const checkbox = event.target.closest("[data-select-poem]");
+  if (checkbox) {
+    if (checkbox.checked) state.selectedPoems.add(checkbox.dataset.selectPoem);
+    else state.selectedPoems.delete(checkbox.dataset.selectPoem);
+    renderPoemTable();
+    renderRequirements();
+  }
+  const compareImage = event.target.closest("[data-compare-image]");
+  if (compareImage) {
+    if (compareImage.checked) {
+      if (state.reviewSelection.size >= 4) {
+        compareImage.checked = false;
+        showToast("一次最多对比 4 张候选。", "warning");
+      } else {
+        state.reviewSelection.add(compareImage.dataset.compareImage);
+      }
+    } else {
+      state.reviewSelection.delete(compareImage.dataset.compareImage);
+    }
+    renderReview();
+  }
+  const requirementSelection = event.target.closest("[data-select-requirement]");
+  if (requirementSelection) {
+    if (requirementSelection.checked) {
+      state.selectedRequirements.add(requirementSelection.dataset.selectRequirement);
+    } else {
+      state.selectedRequirements.delete(requirementSelection.dataset.selectRequirement);
+    }
+    renderRequirements();
+  }
+  const directionSelection = event.target.closest("[data-select-direction]");
+  if (directionSelection) {
+    if (directionSelection.checked) {
+      state.selectedDirections.add(directionSelection.dataset.selectDirection);
+    } else {
+      state.selectedDirections.delete(directionSelection.dataset.selectDirection);
+    }
+    renderDirections();
+  }
+});
+
+document.querySelector("#select-all-poems").addEventListener("change", (event) => {
+  const poems = visiblePoems();
+  poems.forEach((poem) => {
+    if (event.target.checked) state.selectedPoems.add(poem.id);
+    else state.selectedPoems.delete(poem.id);
   });
-  document.querySelector("#gallery-grid").innerHTML = images.map(artCardMarkup).join("");
-  document.querySelector("#gallery-empty").hidden = images.length > 0;
-  const counts = Object.fromEntries(Object.keys(decisionNames).map((key) => [key, images.filter((item) => item.decision === key).length]));
-  document.querySelector("#review-summary").innerHTML = `<span>当前结果 <strong>${images.length}</strong></span><span>待评审 <strong>${counts.candidate}</strong></span><span>已入选 <strong>${counts.selected}</strong></span><span>可交付 <strong>${counts.final}</strong></span>`;
-}
-function renderGalleryFilters() {
-  document.querySelector("#gallery-project-filter").innerHTML = `<option value="active">当前项目</option><option value="all">全部项目</option>${state.projects.map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join("")}`;
-  document.querySelector("#gallery-project-filter").value = state.projectFilter;
-  document.querySelector("#gallery-style-filter").innerHTML = `<option value="all">全部风格</option>${state.styles.map((style) => `<option value="${style.id}">${escapeHtml(style.short_name)}</option>`).join("")}`;
-  document.querySelector("#gallery-style-filter").value = state.styleFilter;
-}
-function renderPoemLibrary(query = "") {
-  const project = getActiveProject(); const normalized = query.trim().toLowerCase();
-  const images = activeImages();
-  const poems = state.poems.filter((poem) => !normalized || [poem.title, poem.author, poem.theme, poem.mood, ...poem.imagery].join(" ").toLowerCase().includes(normalized));
-  document.querySelector("#poem-library").innerHTML = poems.map((poem, index) => {
-    const poemImages = images.filter((image) => image.poem_id === poem.id); const final = poemImages.some((image) => image.decision === "final");
-    const inProject = project?.poem_ids.includes(poem.id);
-    return `<article class="poem-card"><div class="poem-card-content"><span class="poem-card-number">POEM ${String(index + 1).padStart(2, "0")} · ${inProject ? (final ? "已完成" : `${poemImages.length} 张候选`) : "未加入项目"}</span><h3>${escapeHtml(poem.title)}</h3><p class="poem-card-author">${escapeHtml(poem.dynasty)} · ${escapeHtml(poem.author)}</p><div class="poem-card-lines">${poem.lines.slice(0, 4).map(escapeHtml).join("<br>")}</div><div class="poem-card-footer"><span class="theme-tag">${escapeHtml(poem.theme)}</span><button class="poem-create" type="button" data-create-poem="${poem.id}" ${inProject ? "" : "disabled"}>${inProject ? "为此诗作画 →" : "不在当前项目"}</button></div></div><div class="poem-visual" aria-hidden="true"></div></article>`;
-  }).join("");
-}
-function renderStyleLibrary() {
-  document.querySelector("#style-library").innerHTML = state.styles.map((style) => {
-    const anchor = state.images.find((image) => image.style_id === style.id && image.provider === "sample") || state.images.find((image) => image.style_id === style.id);
-    const visual = anchor ? `<div class="style-library-visual has-anchor"><img src="${escapeHtml(anchor.url)}" alt="${escapeHtml(style.name)}风格锚点" /></div>` : `<div class="style-library-visual" style="--style-bg:${style.background};--style-fg:${style.foreground};--style-accent:${style.accent};--style-mid:${style.palette[1]}"><span class="style-visual-ridge"></span></div>`;
-    return `<article class="style-library-card">${visual}<div class="style-library-copy"><div class="style-title-row"><h3>${escapeHtml(style.name)}</h3>${getActiveProject()?.style_id === style.id ? "<span>当前基线</span>" : ""}</div><p>${escapeHtml(style.description)}</p><div class="style-specs"><span>色彩 ${style.paper === "night" ? "冷夜矿物色" : "低饱和"}</span><span>材质 ${escapeHtml(style.paper)} 纸感</span><span>禁用 文字与现代物</span></div><div class="palette-row">${style.palette.map((color) => `<span style="--color:${color}" title="${color}"></span>`).join("")}</div><button class="style-card-action" type="button" data-create-style="${style.id}">用此基线探索 <span>→</span></button></div></article>`;
-  }).join("");
-}
-function renderProjects() {
-  document.querySelector("#project-list").innerHTML = state.projects.map((project) => {
-    const metrics = projectMetrics(project); const total = project.poem_ids.length; const pct = total ? Math.round(metrics.completedPoems / total * 100) : 0;
-    return `<article class="project-card${project.id === getActiveProject()?.id ? " is-active" : ""}"><div class="project-card-main"><div class="project-card-head"><span>${project.id === getActiveProject()?.id ? "当前项目" : "系列项目"}</span><small>${formatDate(project.updated_at)}</small></div><h3>${escapeHtml(project.name)}</h3><p>${escapeHtml(project.purpose)} · ${total} 首诗 · ${escapeHtml(getStyle(project.style_id)?.short_name || "未定风格")}</p><div class="project-card-metrics"><span><strong>${metrics.candidates}</strong> 待评审</span><span><strong>${metrics.selected}</strong> 已入选</span><span><strong>${metrics.finals}</strong> 成品</span></div><div class="project-progress"><span style="width:${pct}%"></span></div></div><div class="project-card-side"><strong>${pct}%</strong><small>系列完成度</small><button type="button" data-activate-project="${project.id}">${project.id === getActiveProject()?.id ? "继续创作" : "切换项目"} →</button></div></article>`;
-  }).join("");
-}
-function renderProjectForm() {
-  document.querySelector("#project-style").innerHTML = state.styles.map((style) => `<option value="${style.id}">${escapeHtml(style.name)}</option>`).join("");
-  document.querySelector("#project-poem-picker").innerHTML = `<span>选择诗词范围</span><div>${state.poems.map((poem) => `<label><input type="checkbox" value="${poem.id}" checked /><span>${escapeHtml(poem.title)}</span></label>`).join("")}</div>`;
-}
-function renderJobs() {
-  const active = state.jobs.filter((job) => ["queued", "running"].includes(job.status));
-  document.querySelector("#active-job-count").textContent = active.length; document.querySelector("#jobs-button").classList.toggle("has-active", active.length > 0);
-  document.querySelector("#job-list").innerHTML = state.jobs.length ? state.jobs.map((job) => `<article class="job-card"><div class="job-card-head"><strong>${escapeHtml(job.poem_title)}</strong><span class="job-status ${job.status}">${statusNames[job.status] || job.status}</span></div><div class="job-card-meta"><span>${job.generation_mode === "converge" ? "收敛迭代" : "方向探索"} · ${escapeHtml(job.style_name)} · ${job.count} 张</span><span>${formatDate(job.created_at)}</span></div><div class="job-progress"><span style="--progress:${job.progress || 0}%"></span></div>${job.error ? `<p class="job-error">${escapeHtml(job.error)}</p>` : ""}</article>`).join("") : `<div class="job-list-empty">还没有生成任务。<br />从创作台开始第一轮探索吧。</div>`;
-}
-function renderAll() {
-  renderProvider(); renderProjectSwitcher(); renderProjectHero(); renderStats(); renderSop(); renderPoemSelect(); renderStyleSelects(); renderRecent(); renderGalleryFilters(); renderGallery(); renderPoemLibrary(document.querySelector("#poem-search")?.value || ""); renderStyleLibrary(); renderProjects(); renderProjectForm(); renderJobs();
-}
+  renderPoemTable();
+  renderRequirements();
+});
 
-function switchView(view, options = {}) {
-  if (!viewMeta[view]) view = "today";
-  document.querySelectorAll("[data-view-panel]").forEach((panel) => panel.classList.toggle("is-active", panel.dataset.viewPanel === view));
-  document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
-  document.querySelector("#page-eyebrow").textContent = viewMeta[view].eyebrow; document.querySelector("#page-title").textContent = viewMeta[view].title;
-  if (!options.preserveHash) history.replaceState(null, "", `#${view}`); window.scrollTo({ top: 0, behavior: "auto" });
-}
-function jumpToGenerator(poemId, styleId, options = {}) {
-  switchView("today");
-  if (poemId && getPoem(poemId)) { document.querySelector("#poem-select").value = poemId; updatePoemPreview(); }
-  if (styleId && getStyle(styleId)) { document.querySelector("#style-select").value = styleId; updateDirectionVisual(); }
-  if (options.mode) { const radio = document.querySelector(`input[name="generation_mode"][value="${options.mode}"]`); if (radio) radio.checked = true; updateModeUI(options.mode); }
-  if (options.parentImageId) renderParentOptions(options.parentImageId);
-  requestAnimationFrame(() => document.querySelector("#generator").scrollIntoView({ behavior: "smooth", block: "start" }));
-}
-function activateProject(projectId) {
-  if (!getProject(projectId)) return;
-  state.activeProjectId = projectId; state.projectFilter = "active"; renderAll(); showToast(`已切换到「${getActiveProject().name}」`);
-}
+document.querySelector("#poem-search").addEventListener("input", (event) => {
+  state.poemQuery = event.target.value;
+  renderPoemTable();
+});
 
-async function patchImage(imageId, updates, successMessage = "评审已保存") {
-  const payload = await api(`/api/images/${imageId}`, { method: "PATCH", body: JSON.stringify(updates) });
-  const index = state.images.findIndex((item) => item.id === imageId); if (index >= 0) state.images[index] = payload.image;
-  renderProjectHero(); renderStats(); renderSop(); renderRecent(); renderGallery(); renderProjects();
-  if (state.currentImageId === imageId && document.querySelector("#art-dialog").open) populateImageDialog(payload.image);
-  showToast(successMessage); return payload.image;
-}
-function decisionBadgeMarkup(image) { return `${decisionNames[image.decision] || "待评审"}`; }
-function populateImageDialog(image) {
-  const poem = getPoem(image.poem_id); if (!poem) return;
-  document.querySelector("#dialog-image").src = image.url; document.querySelector("#dialog-image").alt = `${image.poem_title}的${image.style_name}插图`;
-  document.querySelector("#dialog-style").textContent = `${escapeHtml(image.project_name)} · ${escapeHtml(image.style_name)}`;
-  document.querySelector("#dialog-title").textContent = image.poem_title; document.querySelector("#dialog-author").textContent = `${poem.dynasty} · ${image.author}`;
-  document.querySelector("#dialog-poem").innerHTML = poem.lines.map(escapeHtml).join("<br>");
-  const badge = document.querySelector("#dialog-decision"); badge.textContent = decisionBadgeMarkup(image); badge.className = `decision-badge decision-${image.decision}`;
-  const children = state.images.filter((item) => item.parent_image_id === image.id).length;
-  document.querySelector("#dialog-lineage").innerHTML = image.parent_image_id ? `<span>衍生版本</span><strong>来自已入选父候选</strong>` : `<span>初始候选</span><strong>${children ? `已有 ${children} 个衍生版本` : "尚未创建衍生版本"}</strong>`;
-  document.querySelector("#dialog-meta").innerHTML = `<span>${image.generation_mode === "converge" ? "收敛迭代" : "方向探索"}</span><span>${image.provider === "openai" ? "AI 生成" : image.provider === "sample" ? "AI 风格样图" : "演示渲染"}</span><span>${escapeHtml(image.aspect_ratio)}</span><span>${formatDate(image.created_at)}</span>`;
-  document.querySelector("#feedback-options").innerHTML = feedbackLabels.map((label) => `<label><input type="checkbox" value="${label}" ${(image.feedback_tags || []).includes(label) ? "checked" : ""} /><span>${label}</span></label>`).join("");
-  document.querySelector("#review-note").value = image.review_note || "";
-  document.querySelector("#qc-list").innerHTML = Object.entries(qcLabels).map(([key, label]) => `<label><input type="checkbox" data-qc-key="${key}" ${image.qc?.[key] ? "checked" : ""} /><span>${label}</span></label>`).join("");
-  const allQc = Object.keys(qcLabels).every((key) => image.qc?.[key]); const finalButton = document.querySelector("#finalize-image");
-  finalButton.disabled = !allQc && image.decision !== "final"; finalButton.textContent = image.decision === "final" ? "✓ 已通过质检，可交付" : allQc ? "标记为可交付成品" : `完成 ${Object.keys(qcLabels).filter((key) => image.qc?.[key]).length} / 5 项质检`;
-  document.querySelector("#dialog-prompt").textContent = image.prompt;
-  const download = document.querySelector("#dialog-download"); download.href = image.url; download.download = `${image.poem_title}-${image.style_name}.${image.url.split(".").pop()}`;
-}
-function openImageDialog(imageId) {
-  const image = state.images.find((item) => item.id === imageId); if (!image) return;
-  state.currentImageId = imageId; populateImageDialog(image); document.querySelector("#art-dialog").showModal();
-}
-async function saveReview() {
-  if (!state.currentImageId) return;
-  const feedback_tags = [...document.querySelectorAll("#feedback-options input:checked")].map((item) => item.value);
-  const review_note = document.querySelector("#review-note").value;
-  try { await patchImage(state.currentImageId, { feedback_tags, review_note }, "评审意见已保存"); } catch (error) { showToast(error.message, "error"); }
-}
-async function setDecision(decision) {
-  if (!state.currentImageId) return;
-  try { await patchImage(state.currentImageId, { decision }, decision === "selected" ? "已入选，可继续收敛" : "候选已淘汰"); } catch (error) { showToast(error.message, "error"); }
-}
-async function saveQc() {
-  if (!state.currentImageId) return;
-  const qc = {}; document.querySelectorAll("#qc-list input").forEach((item) => { qc[item.dataset.qcKey] = item.checked; });
-  try { await patchImage(state.currentImageId, { qc }, "质检进度已保存"); } catch (error) { showToast(error.message, "error"); }
-}
-async function finalizeCurrentImage() {
-  if (!state.currentImageId) return;
-  const image = state.images.find((item) => item.id === state.currentImageId); if (!image) return;
-  if (!Object.keys(qcLabels).every((key) => image.qc?.[key])) { showToast("请先完成全部五项质检。", "error"); return; }
-  try { await patchImage(image.id, { decision: "final" }, "已标记为可交付成品"); } catch (error) { showToast(error.message, "error"); }
-}
-function iterateCurrentImage() {
-  const image = state.images.find((item) => item.id === state.currentImageId); if (!image) return;
-  document.querySelector("#art-dialog").close(); jumpToGenerator(image.poem_id, image.style_id, { mode: "converge", parentImageId: image.id });
-  if (image.review_note) document.querySelector("#custom-note").value = image.review_note;
-}
-async function exportPoemCard() {
-  const image = state.images.find((item) => item.id === state.currentImageId); const poem = image && getPoem(image.poem_id); if (!image || !poem) return;
-  const source = new Image(); source.src = image.url; await source.decode();
-  const canvas = document.createElement("canvas"); canvas.width = 1400; canvas.height = 2000; const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#f3eee3"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  const imageBox = { x: 90, y: 90, w: 1220, h: 1280 }; const scale = Math.min(imageBox.w / source.width, imageBox.h / source.height); const w = source.width * scale; const h = source.height * scale;
-  ctx.drawImage(source, imageBox.x + (imageBox.w - w) / 2, imageBox.y + (imageBox.h - h) / 2, w, h);
-  ctx.fillStyle = "#1d2926"; ctx.font = "600 74px KaiTi, STKaiti, serif"; ctx.fillText(poem.title, 110, 1510);
-  ctx.fillStyle = "#7f837c"; ctx.font = "32px system-ui"; ctx.fillText(`${poem.dynasty} · ${poem.author}`, 112, 1570);
-  ctx.fillStyle = "#354c46"; ctx.font = "42px KaiTi, STKaiti, serif"; poem.lines.forEach((line, index) => ctx.fillText(line, 112, 1660 + index * 62));
-  ctx.fillStyle = "#b24a3b"; ctx.fillRect(1240, 1490, 55, 55); ctx.fillStyle = "#fff"; ctx.font = "36px KaiTi"; ctx.fillText("绘", 1249, 1532);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png")); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `${poem.title}-诗画卡.png`; link.click(); URL.revokeObjectURL(link.href); showToast("诗画卡已导出");
-}
+document.querySelector("#poem-status-filter").addEventListener("change", (event) => {
+  state.poemStatus = event.target.value;
+  renderPoemTable();
+});
 
-function openJobs() { const drawer = document.querySelector("#jobs-drawer"); const scrim = document.querySelector("#drawer-scrim"); scrim.hidden = false; requestAnimationFrame(() => { drawer.classList.add("is-open"); drawer.setAttribute("aria-hidden", "false"); scrim.classList.add("is-visible"); }); }
-function closeJobs() { const drawer = document.querySelector("#jobs-drawer"); const scrim = document.querySelector("#drawer-scrim"); drawer.classList.remove("is-open"); drawer.setAttribute("aria-hidden", "true"); scrim.classList.remove("is-visible"); window.setTimeout(() => { if (!scrim.classList.contains("is-visible")) scrim.hidden = true; }, 190); }
-async function refreshImages() { const payload = await api("/api/images"); state.images = payload.images; renderProjectHero(); renderStats(); renderSop(); renderRecent(); renderGallery(); renderProjects(); }
-async function refreshJobs() {
-  try { const payload = await api("/api/jobs"); state.jobs = payload.jobs; let refresh = false;
-    for (const job of state.jobs) if (["completed", "failed"].includes(job.status) && !state.knownTerminalJobs.has(job.id)) { state.knownTerminalJobs.add(job.id); if (job.status === "completed") { refresh = true; showToast(`${job.poem_title} · ${job.generation_mode === "converge" ? "收敛版本" : "探索候选"}已完成`); } else showToast(`${job.poem_title}生成失败：${job.error || "未知错误"}`, "error"); }
-    renderJobs(); if (refresh) await refreshImages(); schedulePolling();
-  } catch (error) { showToast(`任务状态更新失败：${error.message}`, "error"); }
-}
-function schedulePolling() { if (state.pollTimer) window.clearTimeout(state.pollTimer); const active = state.jobs.some((job) => ["queued", "running"].includes(job.status)); state.pollTimer = window.setTimeout(refreshJobs, active ? 1200 : 6000); }
-async function submitGeneration(event) {
-  event.preventDefault(); const button = document.querySelector("#generate-button"); const customNote = document.querySelector("#custom-note").value.trim(); const parentId = document.querySelector("#parent-image-select").value;
-  if (state.generationMode === "converge" && !parentId) { showToast("收敛迭代必须选择一张已入选父候选。", "error"); return; }
-  if (state.generationMode === "converge" && !customNote) { showToast("请明确填写本轮需要修改的问题。", "error"); return; }
-  const payload = { project_id: getActiveProject().id, poem_id: document.querySelector("#poem-select").value, style_id: document.querySelector("#style-select").value, aspect_ratio: document.querySelector("#ratio-select").value, count: Number(document.querySelector("#count-select").value), custom_note: customNote, generation_mode: state.generationMode, parent_image_id: parentId || null, preserve: [...document.querySelectorAll("#preserve-options input:checked")].map((item) => item.value) };
-  button.disabled = true; try { const result = await api("/api/generate", { method: "POST", body: JSON.stringify(payload) }); state.jobs.unshift(result.job); renderJobs(); openJobs(); showToast(state.generationMode === "converge" ? "收敛任务已创建" : "探索任务已创建"); schedulePolling(); } catch (error) { showToast(error.message, "error"); } finally { button.disabled = false; }
-}
-async function submitProject(event) {
-  event.preventDefault(); const poem_ids = [...document.querySelectorAll("#project-poem-picker input:checked")].map((item) => item.value); if (!poem_ids.length) { showToast("请至少选择一首诗。", "error"); return; }
-  try { const result = await api("/api/projects", { method: "POST", body: JSON.stringify({ name: document.querySelector("#project-name").value, purpose: document.querySelector("#project-purpose").value, aspect_ratio: document.querySelector("#project-ratio").value, style_id: document.querySelector("#project-style").value, poem_ids }) }); state.projects.push(result.project); state.activeProjectId = result.project.id; document.querySelector("#project-dialog").close(); event.currentTarget.reset(); renderAll(); switchView("today"); showToast("项目已创建，先用代表诗建立风格基线"); } catch (error) { showToast(error.message, "error"); }
-}
+let queueSearchTimer = null;
+document.querySelector("#queue-task-search").addEventListener("input", (event) => {
+  state.queueTaskQuery = event.target.value.trim();
+  clearTimeout(queueSearchTimer);
+  queueSearchTimer = setTimeout(() => refreshTaskPage({ offset: 0 }), 240);
+});
+document.querySelector("#queue-task-status").addEventListener("change", (event) => {
+  state.queueTaskFilter = event.target.value;
+  refreshTaskPage({ offset: 0 });
+});
+document.querySelector("#queue-batch-filter").addEventListener("change", (event) => {
+  state.queueBatchFilter = event.target.value;
+  refreshTaskPage({ offset: 0 });
+});
+document.querySelector("#queue-error-filter").addEventListener("change", (event) => {
+  state.queueErrorFilter = event.target.value.trim();
+  refreshTaskPage({ offset: 0 });
+});
 
-function bindEvents() {
-  document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-  document.querySelectorAll("[data-jump-to-generator]").forEach((button) => button.addEventListener("click", () => jumpToGenerator()));
-  document.addEventListener("click", (event) => {
-    const open = event.target.closest("[data-open-image]"); if (open) openImageDialog(open.dataset.openImage);
-    const poem = event.target.closest("[data-create-poem]"); if (poem && !poem.disabled) jumpToGenerator(poem.dataset.createPoem);
-    const style = event.target.closest("[data-create-style]"); if (style) jumpToGenerator(null, style.dataset.createStyle);
-    const view = event.target.closest("[data-switch-view]"); if (view && !view.disabled) switchView(view.dataset.switchView);
-    const project = event.target.closest("[data-activate-project]"); if (project) { activateProject(project.dataset.activateProject); switchView("today"); }
-    const decision = event.target.closest("[data-set-decision]"); if (decision) setDecision(decision.dataset.setDecision);
-  });
-  document.querySelector("#project-switcher").addEventListener("change", (event) => activateProject(event.target.value));
-  document.querySelector("#poem-select").addEventListener("change", updatePoemPreview); document.querySelector("#style-select").addEventListener("change", updateDirectionVisual);
-  document.querySelectorAll('input[name="generation_mode"]').forEach((radio) => radio.addEventListener("change", () => updateModeUI(radio.value)));
-  document.querySelector("#generator-form").addEventListener("submit", submitGeneration); document.querySelector("#poem-search").addEventListener("input", (event) => renderPoemLibrary(event.target.value));
-  document.querySelector("#gallery-project-filter").addEventListener("change", (event) => { state.projectFilter = event.target.value; renderGallery(); }); document.querySelector("#gallery-decision-filter").addEventListener("change", (event) => { state.decisionFilter = event.target.value; renderGallery(); }); document.querySelector("#gallery-style-filter").addEventListener("change", (event) => { state.styleFilter = event.target.value; renderGallery(); });
-  document.querySelector("#jobs-button").addEventListener("click", openJobs); document.querySelector("#close-jobs").addEventListener("click", closeJobs); document.querySelector("#drawer-scrim").addEventListener("click", closeJobs);
-  document.querySelector("#dialog-close").addEventListener("click", () => document.querySelector("#art-dialog").close()); document.querySelector("#art-dialog").addEventListener("click", (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); });
-  document.querySelector("#save-review").addEventListener("click", saveReview); document.querySelector("#qc-list").addEventListener("change", saveQc); document.querySelector("#finalize-image").addEventListener("click", finalizeCurrentImage); document.querySelector("#dialog-iterate").addEventListener("click", iterateCurrentImage); document.querySelector("#dialog-export-card").addEventListener("click", exportPoemCard);
-  document.querySelector("#new-project-button").addEventListener("click", () => document.querySelector("#project-dialog").showModal()); document.querySelector("#project-dialog-close").addEventListener("click", () => document.querySelector("#project-dialog").close()); document.querySelector("#project-form").addEventListener("submit", submitProject);
-  document.querySelector("#open-help").addEventListener("click", () => document.querySelector("#help-dialog").showModal()); document.querySelector("#help-close").addEventListener("click", () => document.querySelector("#help-dialog").close());
-  window.addEventListener("hashchange", () => switchView(location.hash.slice(1), { preserveHash: true }));
-  window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeJobs(); const dialog = document.querySelector("#art-dialog"); if (!dialog.open || ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return; if (event.key === "1") setDecision("selected"); if (event.key === "2") setDecision("rejected"); });
-}
-async function initialize() {
-  try { const payload = await api("/api/bootstrap"); Object.assign(state, { poems: payload.poems, styles: payload.styles, projects: payload.projects, images: payload.images, jobs: payload.jobs, config: payload.config }); state.activeProjectId = payload.projects[0]?.id || null; for (const job of state.jobs) if (["completed", "failed"].includes(job.status)) state.knownTerminalJobs.add(job.id); renderAll(); bindEvents(); updateModeUI("explore"); switchView(location.hash.slice(1) || "today", { preserveHash: true }); schedulePolling(); }
-  catch (error) { document.body.innerHTML = `<main style="max-width:720px;margin:12vh auto;padding:32px;font-family:system-ui;color:#1d2926"><h1>无法连接唐诗绘卷本地服务</h1><p>${escapeHtml(error.message)}</p><p>请确认已运行 <code>python3 server.py</code>。</p></main>`; }
-}
-initialize();
+document.querySelector("#refresh-button").addEventListener("click", () => loadData());
+document.querySelector("#current-role").addEventListener("change", (event) => {
+  ACTOR.role = event.target.value;
+  ACTOR.id = `local-${ACTOR.role}`;
+  localStorage.setItem("tang-sop-role", ACTOR.role);
+  renderAll();
+  showToast(`已切换为${roleLabels[ACTOR.role]}视图；关键写操作仍由服务端校验角色。`);
+});
+document.querySelector("#open-instruction-button").addEventListener("click", () => openInstructionDialog());
+document.querySelector("#instruction-form").addEventListener("submit", saveInstructionVersion);
+document.querySelector("#open-style-button").addEventListener("click", openStyleDialog);
+document.querySelector("#style-form").addEventListener("submit", saveStyleVersion);
+document.querySelector("#requirement-form").addEventListener("submit", saveRequirement);
+document.querySelector("#direction-form").addEventListener("submit", saveDirectionRevision);
+document.querySelector("#open-batch-button").addEventListener("click", openBatchDialog);
+document.querySelector("#batch-form").addEventListener("submit", estimateBatch);
+document.querySelector("#create-batch-button").addEventListener("click", createAndStartBatch);
+document.addEventListener("submit", (event) => {
+  if (event.target.matches("#budget-form")) saveBudget(event);
+});
+document.querySelector("#batch-form").addEventListener("change", () => {
+  state.batchEstimate = null;
+  document.querySelector("#batch-estimate").hidden = true;
+  document.querySelector("#create-batch-button").disabled = true;
+  document.querySelector("#create-batch-button").textContent = "创建并启动";
+});
+document.querySelector("#open-import-button").addEventListener("click", () => {
+  document.querySelector("#import-dialog").showModal();
+});
+document.querySelector("#import-form").addEventListener("submit", previewImport);
+document.querySelector("#commit-import-button").addEventListener("click", commitImport);
+document.querySelector("#rework-form").addEventListener("submit", submitRework);
+document.querySelector("#compare-selected-button").addEventListener("click", openComparison);
+document.querySelector("#export-assets-button").addEventListener("click", exportFinalAssets);
+document.querySelector("#review-show-blocked").addEventListener("change", (event) => {
+  state.reviewShowBlocked = event.target.checked;
+  renderReview();
+});
+document.querySelector("#asset-search").addEventListener("input", (event) => {
+  state.assetQuery = event.target.value;
+  renderAssets();
+});
+document.querySelector("#import-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  if (file.size > 2_000_000) {
+    showToast("导入文件不能超过 2 MB。", "error");
+    return;
+  }
+  try {
+    document.querySelector("#import-json").value = await file.text();
+    showToast(`已读取 ${file.name}，请点击“预检数据”。`);
+  } catch (error) {
+    showToast(`无法读取文件：${error.message}`, "error");
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+    return;
+  }
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
+  const dialog = document.querySelector("#image-dialog");
+  if (!dialog.open || !productionImageById(state.currentImageId)) return;
+  const images = productionImages().filter(
+    (image) =>
+      state.reviewShowBlocked ||
+      !["qc_blocked", "needs_manual_qc"].includes(image.status),
+  );
+  const currentIndex = images.findIndex((image) => image.id === state.currentImageId);
+  if (["j", "J", "ArrowRight"].includes(event.key) && images.length) {
+    event.preventDefault();
+    openProductionImage(images[(currentIndex + 1) % images.length].id);
+  } else if (["k", "K", "ArrowLeft"].includes(event.key) && images.length) {
+    event.preventDefault();
+    openProductionImage(images[(currentIndex - 1 + images.length) % images.length].id);
+  } else if (["s", "S"].includes(event.key)) {
+    sendReviewDecision(state.currentImageId, "selected");
+  } else if (["x", "X"].includes(event.key)) {
+    sendReviewDecision(state.currentImageId, "rejected");
+  } else if (["f", "F"].includes(event.key)) {
+    sendReviewDecision(state.currentImageId, "final_candidate");
+  } else if (["r", "R"].includes(event.key)) {
+    openRework(state.currentImageId);
+  }
+});
+
+const initialView = location.hash.slice(1);
+switchView(viewMeta[initialView] ? initialView : "overview");
+loadData();
+
+setInterval(async () => {
+  const hasActiveBatch = state.sop.batches.some((batch) =>
+    ["queued", "running"].includes(batch.status),
+  );
+  const hasLegacyJob = state.legacy.jobs.some((job) =>
+    ["queued", "running"].includes(job.status),
+  );
+  if (!hasActiveBatch && !hasLegacyJob) return;
+  try {
+    await loadData({ quiet: true });
+  } catch (error) {
+    console.error(error);
+  }
+}, 2500);

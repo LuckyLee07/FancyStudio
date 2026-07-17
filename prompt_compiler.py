@@ -1,0 +1,253 @@
+"""Deterministic, provider-aware prompt compilation for production tasks."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+
+TEMPLATE_VERSIONS = {
+    "demo": "demo-six-segment-v1",
+    "openai": "openai-six-segment-v1",
+}
+
+RATIO_SPECS = {
+    "portrait": {"label": "2:3 portrait", "width": 1024, "height": 1536},
+    "square": {"label": "1:1 square", "width": 1024, "height": 1024},
+    "landscape": {"label": "3:2 landscape", "width": 1536, "height": 1024},
+}
+
+
+class PromptCompileError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _clean_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _join(value: Any, fallback: str = "未指定") -> str:
+    items = _clean_list(value)
+    return "；".join(items) if items else fallback
+
+
+def _required_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise PromptCompileError("PROMPT_SEGMENT_MISSING", f"Prompt 缺少 {key} 段。")
+    return value
+
+
+def build_segments(payload: dict[str, Any]) -> dict[str, Any]:
+    poem = _required_dict(payload, "poem")
+    requirement = _required_dict(payload, "requirement")
+    direction = _required_dict(payload, "direction")
+    style = _required_dict(payload, "style")
+    instruction = _required_dict(payload, "instruction")
+    requirement_content = _required_dict(requirement, "content")
+    direction_content = _required_dict(direction, "content")
+    instruction_content = _required_dict(instruction, "content")
+    aspect_ratio = str(payload.get("aspect_ratio") or "")
+    if aspect_ratio not in RATIO_SPECS:
+        raise PromptCompileError("PROMPT_OUTPUT_SPEC_MISSING", "Prompt 缺少有效输出比例。")
+    if not _clean_list(poem.get("lines")):
+        raise PromptCompileError("PROMPT_CONTENT_MISSING", "Prompt 缺少诗词正文。")
+    if not str(style.get("prompt_fragment") or "").strip():
+        raise PromptCompileError("PROMPT_STYLE_MISSING", "Prompt 缺少已发布风格片段。")
+    if not str(instruction_content.get("visual_goal") or "").strip():
+        raise PromptCompileError("PROMPT_INSTRUCTION_MISSING", "Prompt 缺少全局视觉目标。")
+
+    segments: dict[str, Any] = {
+        "content": {
+            "poem_id": poem.get("id"),
+            "content_version_id": poem.get("content_version_id"),
+            "content_version": poem.get("content_version"),
+            "title": poem.get("title"),
+            "author": poem.get("author"),
+            "dynasty": poem.get("dynasty"),
+            "lines": _clean_list(poem.get("lines")),
+            "theme": poem.get("theme"),
+            "mood": poem.get("mood"),
+        },
+        "requirement": {
+            "id": requirement.get("id"),
+            "version": requirement.get("version"),
+            "theme": requirement_content.get("theme"),
+            "mood": requirement_content.get("mood"),
+            "time_and_place": requirement_content.get("time_and_place"),
+            "subject": requirement_content.get("subject"),
+            "core_imagery": _clean_list(requirement_content.get("core_imagery")),
+            "must_have": _clean_list(requirement_content.get("must_have")),
+            "avoid": _clean_list(requirement_content.get("avoid")),
+            "historical_risks": _clean_list(
+                requirement_content.get("historical_risks")
+            ),
+        },
+        "direction": {
+            "id": direction.get("id"),
+            "version": direction.get("version"),
+            "type": direction.get("type"),
+            "title": direction_content.get("title"),
+            "subject": direction_content.get("subject"),
+            "shot": direction_content.get("shot"),
+            "foreground": direction_content.get("foreground"),
+            "midground": direction_content.get("midground"),
+            "background": direction_content.get("background"),
+            "action": direction_content.get("action"),
+            "lighting": direction_content.get("lighting"),
+            "palette": direction_content.get("palette"),
+            "whitespace": direction_content.get("whitespace"),
+            "preserve": _clean_list(direction_content.get("preserve")),
+            "avoid": _clean_list(direction_content.get("avoid")),
+        },
+        "style": {
+            "id": style.get("id"),
+            "version_id": style.get("version_id"),
+            "version": style.get("version"),
+            "name": style.get("name"),
+            "prompt_fragment": style.get("prompt_fragment"),
+            "palette": _clean_list(style.get("palette")),
+        },
+        "output": {
+            "aspect_ratio": aspect_ratio,
+            **RATIO_SPECS[aspect_ratio],
+            "layout_safe_area": "保留可用于诗文排版的安全留白，但图内不得生成文字",
+            "prohibitions": ["文字", "字母", "题款", "水印", "标志", "边框外溢"],
+        },
+        "instruction": {
+            "id": instruction.get("id"),
+            "version": instruction.get("version"),
+            "name": instruction.get("name"),
+            "audience": instruction_content.get("audience"),
+            "visual_goal": instruction_content.get("visual_goal"),
+            "composition_rules": _clean_list(
+                instruction_content.get("composition_rules")
+            ),
+            "historical_rules": _clean_list(
+                instruction_content.get("historical_rules")
+            ),
+            "global_avoid": _clean_list(instruction_content.get("global_avoid")),
+        },
+    }
+    rework = payload.get("rework")
+    if isinstance(rework, dict):
+        segments["rework"] = {
+            "order_id": rework.get("order_id"),
+            "parent_image_id": rework.get("parent_image_id"),
+            "preserve": _clean_list(rework.get("preserve")),
+            "change": _clean_list(rework.get("change")),
+            "avoid": _clean_list(rework.get("avoid")),
+            "note": str(rework.get("note") or "").strip(),
+        }
+    return segments
+
+
+def _render_text(segments: dict[str, Any], provider: str) -> str:
+    content = segments["content"]
+    requirement = segments["requirement"]
+    direction = segments["direction"]
+    style = segments["style"]
+    output = segments["output"]
+    instruction = segments["instruction"]
+    blocks = [
+        (
+            "[01 CONTENT / 诗词正文]\n"
+            f"《{content['title']}》· {content['dynasty']} · {content['author']}\n"
+            f"正文：{' / '.join(content['lines'])}\n"
+            f"题材：{content.get('theme') or '未分类'}；情绪：{content.get('mood') or '待确认'}"
+        ),
+        (
+            "[02 REQUIREMENT / 内容需求]\n"
+            f"时空：{requirement.get('time_and_place') or '依据原诗审慎表达'}\n"
+            f"主体：{requirement.get('subject') or '依据原诗核心意象'}\n"
+            f"核心意象：{_join(requirement.get('core_imagery'))}\n"
+            f"必须出现：{_join(requirement.get('must_have'))}\n"
+            f"禁止出现：{_join(requirement.get('avoid'))}\n"
+            f"历史风险：{_join(requirement.get('historical_risks'))}"
+        ),
+        (
+            "[03 DIRECTION / 已批准画面方向]\n"
+            f"类型：{direction.get('type') or '未指定'}；标题：{direction.get('title') or '未命名方向'}\n"
+            f"主体与景别：{direction.get('subject') or '未指定'}；{direction.get('shot') or '未指定'}\n"
+            f"前中后景：{direction.get('foreground') or '—'} / {direction.get('midground') or '—'} / {direction.get('background') or '—'}\n"
+            f"动作：{direction.get('action') or '静态诗意'}；光线：{direction.get('lighting') or '自然光'}\n"
+            f"色彩：{direction.get('palette') or '遵循风格包'}；留白：{direction.get('whitespace') or '保留排版安全区'}\n"
+            f"保持：{_join(direction.get('preserve'))}；方向禁用：{_join(direction.get('avoid'))}"
+        ),
+        (
+            "[04 STYLE / 冻结风格版本]\n"
+            f"{style.get('name') or style.get('id')} v{style.get('version')}\n"
+            f"{style.get('prompt_fragment')}\n"
+            f"色板：{_join(style.get('palette'))}"
+        ),
+        (
+            "[05 OUTPUT / 输出规格]\n"
+            f"{output['label']}，目标 {output['width']}×{output['height']}。\n"
+            f"{output['layout_safe_area']}。\n"
+            f"禁止：{_join(output['prohibitions'])}。"
+        ),
+        (
+            "[06 GLOBAL / 全局规范]\n"
+            f"受众：{instruction.get('audience') or '内容出版团队'}\n"
+            f"视觉目标：{instruction.get('visual_goal')}\n"
+            f"构图原则：{_join(instruction.get('composition_rules'))}\n"
+            f"历史原则：{_join(instruction.get('historical_rules'))}\n"
+            f"全局禁用：{_join(instruction.get('global_avoid'))}"
+        ),
+    ]
+    if "rework" in segments:
+        rework = segments["rework"]
+        blocks.append(
+            "[07 REWORK / 结构化返工]\n"
+            f"父图：{rework.get('parent_image_id')}\n"
+            f"必须保持：{_join(rework.get('preserve'))}\n"
+            f"只修改：{_join(rework.get('change'))}\n"
+            f"禁止：{_join(rework.get('avoid'))}\n"
+            f"备注：{rework.get('note') or '无'}"
+        )
+    prefix = (
+        "Create one original, publication-ready editorial illustration. "
+        "Treat every numbered block as a hard production contract."
+        if provider == "openai"
+        else "Deterministic demo rendering contract; preserve all source references."
+    )
+    return f"{prefix}\n\n" + "\n\n".join(blocks)
+
+
+def compile_generation_prompt(
+    payload: dict[str, Any],
+    provider: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise PromptCompileError("INVALID_PROMPT_PAYLOAD", "Prompt 输入必须是对象。")
+    provider = str(provider).strip().lower()
+    if provider not in TEMPLATE_VERSIONS:
+        raise PromptCompileError("UNSUPPORTED_PROMPT_PROVIDER", "没有对应的 Provider Prompt 模板。")
+    segments = build_segments(payload)
+    template_version = TEMPLATE_VERSIONS[provider]
+    canonical = json.dumps(
+        {"template_version": template_version, "segments": segments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    text = _render_text(segments, provider)
+    return {
+        "template_version": template_version,
+        "provider": provider,
+        "hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "text": text,
+        "segments": segments,
+        "source_refs": {
+            "content_version_id": segments["content"].get("content_version_id"),
+            "instruction_version_id": segments["instruction"].get("id"),
+            "requirement_id": segments["requirement"].get("id"),
+            "direction_id": segments["direction"].get("id"),
+            "style_version_id": segments["style"].get("version_id"),
+        },
+    }

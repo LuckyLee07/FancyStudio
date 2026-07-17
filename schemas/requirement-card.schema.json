@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fancystudio.local/schemas/requirement-card-v1.json",
+  "title": "RequirementCard v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "theme",
+    "mood",
+    "time_and_place",
+    "subject",
+    "core_imagery",
+    "composition",
+    "must_have",
+    "avoid",
+    "historical_risks",
+    "uncertainties",
+    "evidence",
+    "confidence",
+    "editor_note",
+    "locked_fields"
+  ],
+  "properties": {
+    "theme": {"type": "string", "minLength": 1, "maxLength": 500},
+    "mood": {"type": "string", "minLength": 1, "maxLength": 500},
+    "time_and_place": {"type": "string", "minLength": 1, "maxLength": 500},
+    "subject": {"type": "string", "minLength": 1, "maxLength": 500},
+    "composition": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "editor_note": {"type": "string", "maxLength": 2000},
+    "core_imagery": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "must_have": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "avoid": {"$ref": "#/$defs/nonEmptyStringArray"},
+    "historical_risks": {"$ref": "#/$defs/stringArray"},
+    "uncertainties": {"$ref": "#/$defs/stringArray"},
+    "locked_fields": {
+      "type": "array",
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "theme",
+          "mood",
+          "time_and_place",
+          "subject",
+          "core_imagery",
+          "composition",
+          "must_have",
+          "avoid",
+          "historical_risks",
+          "uncertainties",
+          "editor_note"
+        ]
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time_and_place", "subject", "composition", "historical_risks"],
+      "properties": {
+        "time_and_place": {"$ref": "#/$defs/confidence"},
+        "subject": {"$ref": "#/$defs/confidence"},
+        "composition": {"$ref": "#/$defs/confidence"},
+        "historical_risks": {"$ref": "#/$defs/confidence"}
+      }
+    }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "nonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "quote", "supports"],
+      "properties": {
+        "source": {"enum": ["original_poem", "content_notes", "human_reference"]},
+        "quote": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "supports": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "theme",
+              "mood",
+              "time_and_place",
+              "subject",
+              "core_imagery",
+              "composition",
+              "must_have",
+              "avoid",
+              "historical_risks",
+              "uncertainties"
+            ]
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "level", "basis", "requires_review"],
+      "properties": {
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "level": {"enum": ["low", "medium", "high"]},
+        "basis": {"type": "string", "minLength": 1, "maxLength": 500},
+        "requires_review": {"type": "boolean"}
+      }
+    }
+  }
+}
