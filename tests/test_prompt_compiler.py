@@ -88,9 +88,38 @@ class PromptCompilerTests(unittest.TestCase):
                 "id": "ink-whitespace",
                 "version_id": "stylev_ink-whitespace_v1",
                 "version": 1,
+                "semantic_version": "1.0.0",
+                "schema_version": "style-pack/v1",
                 "name": "极简水墨留白",
                 "prompt_fragment": "minimal Chinese ink wash painting",
                 "palette": ["#EEEAE0", "#303634"],
+                "visual_traits": {
+                    "line": "干湿并用的墨线",
+                    "texture": "生宣纸纤维",
+                    "lighting": "墨色虚实",
+                    "contrast": "局部高对比",
+                    "saturation": "近单色",
+                    "whitespace": "高留白",
+                },
+                "character_design": {
+                    "proportion": "自然比例且尺度偏小",
+                    "expression": "克制",
+                    "costume": "唐代衣着轮廓",
+                },
+                "avoid": ["现代器物", "画面文字"],
+                "risks": ["画面过空"],
+                "art_bible": {
+                    "id": "artbible_global_v1",
+                    "version": 1,
+                    "semantic_version": "1.0.0",
+                    "schema_version": "art-bible/v1",
+                    "content": {
+                        "palette_rules": ["低至中饱和"],
+                        "spatial_rules": ["保留文字安全区"],
+                        "text_prohibitions": ["不得生成文字"],
+                        "historical_boundaries": ["服饰器物符合唐代语境"],
+                    },
+                },
             },
             "aspect_ratio": "portrait",
             "sample_index": 1,
@@ -100,10 +129,10 @@ class PromptCompilerTests(unittest.TestCase):
         first = compile_generation_prompt(self.payload(), "openai")
         second = compile_generation_prompt(self.payload(), "openai")
         self.assertEqual(first, second)
-        self.assertEqual(first["template_version"], "openai-six-segment-v2")
+        self.assertEqual(first["template_version"], "openai-six-segment-v3")
         self.assertEqual(
             first["hash"],
-            "10a8decc6c4246b4be92f81d059f1d16b019fdd75b36e9d59735b4152a279045",
+            "31b9e00b19a65578c72f0dbbfb027a7b21e3ebfa597816496a564892cb92a652",
         )
         for heading in (
             "[01 CONTENT / 诗词正文]",
@@ -121,6 +150,10 @@ class PromptCompilerTests(unittest.TestCase):
         self.assertEqual(
             first["source_refs"]["direction_schema_version"],
             "direction-proposal/v1",
+        )
+        self.assertEqual(
+            first["source_refs"]["art_bible_version_id"],
+            "artbible_global_v1",
         )
 
     def test_provider_direction_and_rework_change_hash_without_losing_lineage(self):

@@ -123,6 +123,31 @@ class FrontendContractTests(unittest.TestCase):
         ):
             self.assertIn(f'name="{field}"', html)
 
+    def test_style_lab_exposes_art_bible_benchmark_and_release_gate(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        for element_id in (
+            "art-bible-dialog",
+            "style-benchmark-dialog",
+            "style-evaluation-dialog",
+            "benchmark-poem-picker",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for field in (
+            "semantic_version",
+            "release_notes",
+            "art_bible_version_id",
+            "positive_examples",
+            "negative_examples",
+        ):
+            self.assertIn(f'name="{field}"', html)
+        self.assertIn("style_benchmark_poems", script)
+        self.assertIn("STYLE LAB", script)
+        self.assertIn("data-start-style-benchmark", script)
+        self.assertIn("style-gate-note", styles)
+        self.assertIn("benchmark-poem-option", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

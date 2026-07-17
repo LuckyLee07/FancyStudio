@@ -97,19 +97,21 @@ class SopStoreTests(unittest.TestCase):
         snapshot = self.store.snapshot()
 
         self.assertEqual(snapshot["summary"]["project"]["id"], DEFAULT_PROJECT_ID)
-        self.assertEqual(snapshot["summary"]["total_poems"], 10)
+        self.assertEqual(snapshot["summary"]["total_poems"], 12)
         self.assertEqual(
-            snapshot["summary"]["status_counts"]["requirement_draft"], 10
+            snapshot["summary"]["status_counts"]["requirement_draft"], 12
         )
-        self.assertEqual(len(snapshot["poems"]), 10)
+        self.assertEqual(len(snapshot["poems"]), 12)
         self.assertEqual(snapshot["requirements"], [])
         self.assertEqual(snapshot["directions"], [])
         self.assertEqual(snapshot["instruction"]["status"], "published")
         self.assertEqual(len(snapshot["instruction_versions"]), 1)
         self.assertEqual(len(snapshot["style_packs"]), 6)
         self.assertTrue(
-            all(style["status"] == "published" for style in snapshot["style_packs"])
+            all(style["status"] == "active" for style in snapshot["style_packs"])
         )
+        self.assertEqual(snapshot["art_bible"]["semantic_version"], "1.0.0")
+        self.assertEqual(len(snapshot["style_benchmark_poems"]), 12)
 
     def test_poem_detail_returns_complete_trace_without_local_asset_paths(self):
         image, _ = self.final_candidate("shan-ju-qiu-ming", "d" * 32)
@@ -161,6 +163,9 @@ class SopStoreTests(unittest.TestCase):
             name="极简水墨留白 · 印刷增强",
             short_name="水墨印刷",
             description="增强纸张层次并限制纯黑面积。",
+            semantic_version="1.1.0",
+            release_notes="调整印刷灰阶与纸张层次，保持水墨留白基线。",
+            art_bible_version_id=self.store.published_art_bible()["id"],
             prompt_fragment="minimal ink wash, print-safe tonal range",
             palette=["#F0EDE5", "#292E2C"],
             settings={
@@ -170,18 +175,112 @@ class SopStoreTests(unittest.TestCase):
                 "paper": "cool",
             },
             applicable_topics=["山水", "羁旅"],
+            visual_traits={
+                "line": "干湿并用的克制墨线",
+                "texture": "可印刷的冷调纸纹",
+                "lighting": "墨色虚实",
+                "contrast": "局部高对比",
+                "saturation": "近单色",
+                "whitespace": "高留白",
+            },
+            character_design={
+                "proportion": "自然比例且尺度偏小",
+                "expression": "含蓄克制",
+                "costume": "唐代服饰轮廓经审核",
+            },
+            avoid=["现代器物", "画面文字"],
+            risks=["画面过空", "跨诗构图同质化"],
+            positive_examples=["主体虽小但焦点明确"],
+            negative_examples=["所有诗都套用孤舟背影"],
             actor={"id": "art-01", "role": "art_director"},
         )
         self.assertEqual(style_v2["version"], 2)
-        self.store.publish_style_pack_version(
+        with self.assertRaises(WorkflowError) as benchmark_gate:
+            self.store.publish_style_pack_version(
+                style_v2["id"], actor={"id": "art-01", "role": "art_director"}
+            )
+        self.assertEqual(benchmark_gate.exception.code, "STYLE_BENCHMARK_REQUIRED")
+
+        benchmark_poem_ids = [
+            "jing-ye-si",
+            "jiang-xue",
+            "lu-zhai",
+            "feng-qiao-ye-bo",
+            "chun-xiao",
+        ]
+        approved_directions = {
+            poem_id: self.ready_poem(poem_id) for poem_id in benchmark_poem_ids
+        }
+        benchmark = self.store.create_style_benchmark_run(
+            style_v2["id"],
+            poem_ids=benchmark_poem_ids,
+            provider="demo",
+            model="demo-renderer",
+            unit_cost=0,
+            actor={"id": "art-01", "role": "art_director"},
+        )
+        self.assertEqual(benchmark["batch"]["task_count"], 20)
+        started = self.store.start_style_benchmark(
+            benchmark["run"]["id"],
+            actor={"id": "art-01", "role": "art_director"},
+        )
+        self.assertEqual(started["batch"]["status"], "queued")
+        for index in range(20):
+            task = self.store.claim_next_task(benchmark["batch"]["id"])
+            self.assertIsNotNone(task)
+            image_id = f"{index + 1:032x}"
+            path = Path(self.temp_dir.name) / f"benchmark-{index}.svg"
+            path.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1536">'
+                f'<rect width="1024" height="1536" fill="#{index + 1:06x}"/>'
+                '</svg>',
+                encoding="utf-8",
+            )
+            self.store.register_production_image(
+                {
+                    "id": image_id,
+                    "url": f"/generated/{image_id}.svg",
+                    "prompt": "style benchmark sample",
+                },
+                task,
+                inspect_image(path, "portrait"),
+            )
+            self.store.complete_task(
+                task["id"],
+                task["attempt_id"],
+                output_image_id=image_id,
+                actual_cost=0,
+                duration_ms=5,
+            )
+        with self.assertRaises(WorkflowError) as isolated_image:
+            self.store.decide_image(
+                f"{1:032x}",
+                "candidate",
+                actor={"id": "art-01", "role": "art_director"},
+            )
+        self.assertEqual(
+            isolated_image.exception.code, "STYLE_BENCHMARK_IMAGE_ISOLATED"
+        )
+        evaluated = self.store.evaluate_style_benchmark(
+            benchmark["run"]["id"],
+            style_match_score=88,
+            off_topic_rate=0.1,
+            favorite_rate=0.45,
+            notes="五首小样符合水墨留白基线。",
+            actor={"id": "art-01", "role": "art_director"},
+        )
+        self.assertEqual(evaluated["status"], "passed")
+        self.assertEqual(evaluated["metrics"]["sample_count"], 20)
+        published_style = self.store.publish_style_pack_version(
             style_v2["id"], actor={"id": "art-01", "role": "art_director"}
         )
+        self.assertEqual(published_style["status"], "active")
         current_style = self.store.published_style_pack(
             DEFAULT_PROJECT_ID, "ink-whitespace"
         )
         self.assertEqual(current_style["id"], style_v2["id"])
 
-        direction_id = self.ready_poem("jing-ye-si")
+        direction_id = approved_directions["jing-ye-si"]
         batch = self.store.create_batch(
             DEFAULT_PROJECT_ID,
             ["jing-ye-si"],
@@ -201,7 +300,7 @@ class SopStoreTests(unittest.TestCase):
             task["prompt"]["requirement"]["instruction_id"], published["id"]
         )
         compiled = task["prompt"]["compiled"]
-        self.assertEqual(compiled["template_version"], "demo-six-segment-v2")
+        self.assertEqual(compiled["template_version"], "demo-six-segment-v3")
         self.assertEqual(len(compiled["hash"]), 64)
         self.assertEqual(compiled["source_refs"]["style_version_id"], style_v2["id"])
         self.assertEqual(compiled["source_refs"]["instruction_version_id"], published["id"])
@@ -671,7 +770,7 @@ class SopStoreTests(unittest.TestCase):
             actor=self.actor,
         )
         self.assertEqual(committed["imported"], 2)
-        self.assertEqual(self.store.summary()["total_poems"], 12)
+        self.assertEqual(self.store.summary()["total_poems"], 14)
         imported = next(
             item
             for item in self.store.list_poems()["items"]
@@ -727,7 +826,7 @@ class SopStoreTests(unittest.TestCase):
                 actor=self.actor,
             )
         self.assertEqual(context.exception.code, "IMPORT_BLOCKED")
-        self.assertEqual(self.store.summary()["total_poems"], 12)
+        self.assertEqual(self.store.summary()["total_poems"], 14)
 
     def test_batch_estimate_execution_attempts_and_partial_failure(self):
         direction_id = self.ready_poem()
@@ -1129,7 +1228,7 @@ class SopStoreTests(unittest.TestCase):
         self.assertTrue(manifest_asset["source"]["style"]["version_id"])
         self.assertEqual(
             manifest_asset["source"]["prompt_template_version"],
-            "demo-six-segment-v2",
+            "demo-six-segment-v3",
         )
         self.assertEqual(len(manifest_asset["source"]["prompt_hash"]), 64)
         self.assertEqual(

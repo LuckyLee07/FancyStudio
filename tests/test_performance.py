@@ -40,14 +40,14 @@ class ProductionScaleTests(unittest.TestCase):
                 "imagery": ["青山", "明月", "归舟"],
                 "source": "自动化规模测试数据",
             }
-            for index in range(1, 291)
+            for index in range(1, 289)
         ]
         imported = self.store.import_poems(
             DEFAULT_PROJECT_ID,
             records,
             actor={"id": "scale-fixture", "role": "system"},
         )
-        self.assertEqual(imported["imported"], 290)
+        self.assertEqual(imported["imported"], 288)
         self.assertEqual(self.store.summary()["total_poems"], 300)
 
         all_poem_ids = [

@@ -2786,6 +2786,112 @@ input[type="checkbox"] {
   border-radius: var(--radius-lg);
 }
 
+.art-bible-panel,
+.benchmark-pool-panel {
+  min-height: 260px;
+}
+
+.art-bible-title,
+.benchmark-pool-title {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-top: 11px;
+}
+
+.art-bible-title h3,
+.benchmark-pool-title h3 {
+  margin: 0;
+}
+
+.art-bible-title small,
+.benchmark-pool-title strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--faint);
+  font-family: ui-monospace, monospace;
+  font-size: 8px;
+}
+
+.art-bible-rule-grid,
+.style-metrics {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.art-bible-rule-grid span,
+.style-metrics span {
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.art-bible-rule-grid small,
+.art-bible-rule-grid strong,
+.style-metrics small,
+.style-metrics strong {
+  display: block;
+}
+
+.art-bible-rule-grid small,
+.style-metrics small {
+  color: var(--faint);
+  font-size: 7px;
+}
+
+.art-bible-rule-grid strong,
+.style-metrics strong {
+  margin-top: 3px;
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.art-bible-versions {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.art-bible-versions > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.art-bible-versions button {
+  min-height: 26px;
+  padding: 4px 8px;
+}
+
+.benchmark-topic-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 13px 0;
+}
+
+.benchmark-topic-cloud span,
+.style-contract-summary span {
+  padding: 4px 7px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  font-size: 7px;
+}
+
+.benchmark-pool-panel > small {
+  color: var(--faint);
+  font-size: 8px;
+  line-height: 1.6;
+}
+
 .resource-section-head {
   display: flex;
   align-items: flex-end;
@@ -2860,9 +2966,81 @@ input[type="checkbox"] {
   font-size: 8px;
 }
 
+.style-contract-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.style-gate-note {
+  min-height: 38px;
+  margin-top: 10px;
+  padding: 8px;
+  color: var(--amber);
+  background: rgba(221, 174, 83, 0.07);
+  border: 1px solid rgba(221, 174, 83, 0.16);
+  border-radius: 8px;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.style-gate-note.is-pass {
+  color: var(--green);
+  background: rgba(76, 190, 137, 0.06);
+  border-color: rgba(76, 190, 137, 0.15);
+}
+
+.style-metrics {
+  margin-top: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .style-card > button {
   width: 100%;
   margin-top: 13px;
+}
+
+.benchmark-poem-picker {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.benchmark-poem-option {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 11px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.benchmark-poem-option:has(input:checked) {
+  background: rgba(232, 183, 77, 0.08);
+  border-color: rgba(232, 183, 77, 0.35);
+}
+
+.benchmark-poem-option.is-disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.benchmark-poem-option span,
+.benchmark-poem-option strong,
+.benchmark-poem-option small,
+.benchmark-poem-option em {
+  display: block;
+}
+
+.benchmark-poem-option small,
+.benchmark-poem-option em {
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 8px;
+  font-style: normal;
 }
 
 .detail-dialog {

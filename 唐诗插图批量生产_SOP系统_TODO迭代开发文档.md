@@ -1,9 +1,9 @@
 # 唐诗插图批量生产 SOP 系统｜TODO 迭代开发文档
 
-> 文档版本：v1.4
+> 文档版本：v1.5
 > 编写日期：2026-07-18
 > 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档
-> 当前代码基线：本地实施版 `v0.10.0`
+> 当前代码基线：本地实施版 `v0.11.0`
 > 文档状态：持续迭代中；以任务状态和自动化测试为准
 
 ---
@@ -355,7 +355,9 @@ flowchart LR
 | InstructionVersion | scope、content、version、status、published_at | 全局 / 项目 AI 指令 |
 | RequirementCard | poem_id、content、must_have、avoid、risks、status、version | 结构化插图需求 |
 | DirectionProposal | requirement_id、type、scene、composition、palette、status | 可审核画面方向 |
-| StylePackVersion | style_id、version、traits、prompt_fragment、references、status | 可复现风格版本 |
+| ArtBibleVersion | semantic_version、rules、benchmark_policy、status | 全项目视觉边界与风格发布政策 |
+| StylePackVersion | style_id、semantic_version、art_bible_id、traits、examples、risks、status | 可复现风格版本 |
+| StyleBenchmarkRun | style_version_id、poem_set、batch_id、metrics、gate_result、status | 风格发布前的小样、评价与门禁记录 |
 | GenerationBatch | selection、settings、budget_estimate、status | 一次批量排产 |
 | GenerationTask | batch_id、poem_id、direction_id、style_version_id、status、idempotency_key | 单个可调度任务 |
 | GenerationAttempt | task_id、provider、model、request、response、usage、error | 每次外部调用 |
@@ -420,10 +422,12 @@ flowchart LR
 
 ### 7.3 风格包
 
-- [ ] P0 AD 建立全局 Art Bible：色彩、线条、人物比例、空间、材质、文字禁令、历史边界；
-- [-] P0 建立首批 6 个风格包，每个包含正例、反例、适用题材、风险和 Prompt 片段；
-- [-] P0 每个风格包有语义版本号和发布说明；
-- [ ] P0 新版本发布前必须跑 12 首基准诗中的至少 5 首；
+- [x] P0 AD 建立全局 Art Bible：色彩、线条、人物比例、空间、材质、文字禁令、历史边界；
+- [x] P0 建立首批 6 个风格包，每个包含正例、反例、适用题材、风险和 Prompt 片段；
+- [x] P0 每个风格包有语义版本号、发布说明并显式绑定 Art Bible 版本；
+- [x] P0 新版本发布前必须跑 12 首基准诗中的至少 5 首，且每首固定 4 张；
+- [x] P0 风格发布必须同时通过批次完成、样本数量、风格匹配分与跑题率门槛；
+- [x] P0 风格基准图只允许进入 Style Lab，不得进入正式审片、返工、成品或导出；
 - [x] P0 生产批次绑定具体 StylePackVersion；
 - [ ] P1 建立风格 × 题材兼容矩阵；
 - [ ] P1 统计每版风格首轮通过率、返工率、单位成品成本；
@@ -431,13 +435,15 @@ flowchart LR
 
 ### 7.4 基准诗与美术验证集
 
-- [ ] P0 AD 与 CE 选定 12 首基准诗，覆盖山水、思乡、送别、边塞、田园、宫廷、儿童熟知和人物叙事；
-- [ ] P0 每首记录最容易误读的点和历史风险；
-- [ ] P0 每种风格至少产出一组 4 宫格，形成内部参考；
-- [ ] P0 明确构图多样性轴：远 / 中 / 近景，有 / 无人物，叙事 / 意境，满构图 / 留白；
+- [x] P0 AD 与 CE 选定 12 首基准诗，覆盖山水、思乡、送别、边塞、田园、宫廷、儿童熟知和人物叙事；
+- [x] P0 每首记录最容易误读的点和历史风险；
+- [-] P0 新风格版本会对至少 5 首诗各产出 4 张小样；6 个迁移基线风格使用显式豁免，尚未补齐各自的真实参考四宫格；
+- [-] P0 DirectionProposal 已结构化记录景别、人物、叙事类型与留白；Style Lab 尚未增加跨样本构图覆盖率硬门禁；
 - [ ] P0 建立唐代服饰、发式、建筑、器物、交通工具的禁错清单；
 - [ ] P1 建立跨诗重复元素阈值，如“月亮 + 背影 + 亭子”过度重复；
 - [ ] P1 建立复现测试：同一批准方向在同版本参数下结果应保持可解释的一致性。
+
+**v0.11.0 验收证据：** `schemas/art-bible.schema.json`、`schemas/style-pack.schema.json`、`style_schema.py`、`data/art_bible.json`、`data/benchmark_poems.json`、Style Lab、`art_bible_versions`、`style_benchmark_runs`、基准批次隔离、Prompt v3 的 Art Bible / StylePack 冻结引用，以及 `tests/test_style_schema.py` 和风格发布端到端回归。
 
 ### 7.5 Prompt 编译
 
@@ -565,8 +571,15 @@ flowchart LR
 
 - [x] `GET/POST /api/instructions`：查询和创建指令版本；
 - [x] `POST /api/instructions/:id/publish`：发布并退役旧指令版本；
+- [x] `GET /api/schemas/art-bible` 与 `GET /api/schemas/style-pack`：读取当前视觉合同；
+- [x] `GET/POST /api/art-bibles`：查询和创建 Art Bible 版本；
+- [x] `POST /api/art-bibles/:id/publish`：发布并退役旧 Art Bible 版本；
 - [x] `GET/POST /api/style-packs`：查询和创建风格版本；
-- [x] `POST /api/style-packs/:id/publish`：发布并退役同风格旧版本；
+- [x] `GET /api/style-benchmark-poems`：读取固定 12 首验证集；
+- [x] `GET /api/style-benchmark-runs`：查询风格测试状态、样本、成本、评价和门禁；
+- [x] `POST /api/style-packs/:id/benchmark`：创建至少 5 首、每首 4 张的隔离基准批次并启动；
+- [x] `POST /api/style-benchmark-runs/:id/evaluate`：提交风格分、跑题率、收藏率和评语，计算发布门禁；
+- [x] `POST /api/style-packs/:id/publish`：仅在测试通过后激活，并退役同风格旧版本；
 - [x] `GET /api/provider-status`：查询 Provider 能力、并发、超时和配置状态；
 - [x] `POST /api/instructions/:id/retire`：填写原因后作废草稿；
 - [x] `POST /api/requirements/generate`：批量创建需求生成任务；
@@ -662,12 +675,12 @@ flowchart LR
 
 **目标：先把需求和方向审核清楚，再允许出图。**
 
-- [ ] AI 实现 Requirement 生成、Schema 校验、修复与缓存；
-- [ ] AI 实现三方向生成和差异性校验；
+- [x] AI 实现 Requirement 生成、Schema 校验、修复与缓存；
+- [x] AI 实现三方向生成和差异性校验；
 - [x] AI 实现模型无关中间表示和 Prompt 编译骨架；
 - [x] BE 实现 Requirement / Direction 版本、批准、退回 API；
 - [x] FE 完成需求板、方向板、批量审批和版本查看；
-- [ ] AD 完成 Art Bible v1 与 6 个风格包 v1；
+- [x] AD 完成结构化 Art Bible v1 与 6 个风格包 v1；真实美术样张仍需 AD 生产验收；
 - [ ] CE 完成 20 首内容和历史风险审核；
 - [ ] QA 建立 20 首需求和方向金标集；
 - [x] QA 验证锁字段重生成不会修改被锁字段。
@@ -772,7 +785,7 @@ flowchart LR
 - [x] E01-T03 实现导入预检、重复匹配和冲突报告；
 - [x] E01-T04 实现事务导入和失败回滚；
 - [x] E01-T05 实现诗词分页、筛选和批量状态查询；
-- [x] E01-T06 迁移当前 10 首基准样例诗词；
+- [x] E01-T06 迁移当前 12 首基准样例诗词；
 - [ ] E01-T07 建立 300 首数据质量报告。
 
 **验收：** 相同文件重复导入不产生重复诗词；正文冲突不会被静默覆盖。
@@ -792,6 +805,23 @@ flowchart LR
 - [x] E02-T09 审计与指令版本差异。
 
 **验收：** 只有内容和美术均批准的方向可以创建生成任务。
+
+### EPIC-02B：Art Bible、Style Lab 与风格发布
+
+**负责人：AD / AI / BE / FE｜依赖：EPIC-02、EPIC-03**
+
+- [x] E02B-T01 定义 Art Bible v1 与 StylePack v1 JSON Schema 和运行时校验；
+- [x] E02B-T02 建立 12 首验证集、题材分类、误读点与历史风险；
+- [x] E02B-T03 StylePack 使用语义版本、发布说明并冻结 Art Bible 引用；
+- [x] E02B-T04 创建至少 5 首 × 每首 4 张的专用基准批次；
+- [x] E02B-T05 记录样本完整性、生成成本、QC 风险、风格分、跑题率和收藏率；
+- [x] E02B-T06 发布门禁失败时阻止激活 StylePack；
+- [x] E02B-T07 基准图与正式生产日报、审片、返工、成品和导出隔离；
+- [x] E02B-T08 Style Lab 完成版本创建、选诗、运行、评价和发布交互；
+- [ ] E02B-T09 为 6 个迁移基线风格补跑真实四宫格并取消基线豁免；
+- [ ] E02B-T10 增加跨样本构图覆盖率与视觉模型自动评分；
+
+**验收：** 任一新风格版本在未完成合格基准测试时无法发布；测试图不会污染正式交付资产和生产指标；生产批次与 Manifest 均能定位 StylePack 和 Art Bible 版本。
 
 ### EPIC-03：批次、队列与预算
 
@@ -862,6 +892,7 @@ flowchart LR
 
 - [x] P0 数据模型、状态机和迁移单元测试；
 - [x] P0 Prompt 编译快照测试；
+- [x] P0 Art Bible / StylePack 合同、语义版本与发布门禁测试；
 - [ ] P0 Provider Adapter 成功、超时、限流和坏响应测试；
 - [x] P0 幂等、重试、暂停、恢复和预算硬停测试；
 - [x] P0 API 非法状态和批量部分失败测试；
@@ -877,14 +908,16 @@ flowchart LR
 2. 对 20 首批量生成需求，其中 1 首 Schema 连续失败，其他不受影响；
 3. 编辑并批准需求，生成 3 个差异方向；
 4. 未批准方向尝试排产时被阻止；
-5. 创建 60 张批次，显示预计成本后启动；
-6. 运行中暂停并重启服务，继续后不重复任务；
-7. Provider 429 自动退避，参数错误不重试；
-8. 自动质检隔离损坏、重复和明显偏题图片；
-9. 美术指导用快捷键完成候选审片；
-10. 从候选创建返工，生成后能追溯到父图；
-11. 锁定终审成品，导出纯图和 Manifest；
-12. 从导出资产反查完整生产链路。
+5. 新 StylePack 未跑基准时发布被阻止，选择 5 首生成 20 张样本后完成评价并发布；
+6. 验证 Style Lab 样本不会进入正式审片、返工、成品、导出或正式生产日报；
+7. 创建 60 张批次，显示预计成本后启动；
+8. 运行中暂停并重启服务，继续后不重复任务；
+9. Provider 429 自动退避，参数错误不重试；
+10. 自动质检隔离损坏、重复和明显偏题图片；
+11. 美术指导用快捷键完成候选审片；
+12. 从候选创建返工，生成后能追溯到父图；
+13. 锁定终审成品，导出纯图和 Manifest；
+14. 从导出资产反查完整生产链路。
 
 ### 13.3 发布级别
 
@@ -903,6 +936,7 @@ flowchart LR
 - 成品无法追溯到需求、方向、Prompt 和模型版本；
 - 服务重启造成任务或人工审核结果丢失；
 - 未通过方向审批仍可批量生成；
+- 未通过风格基准门禁的 StylePack 可以进入正式生产；
 - 预算硬上限失效；
 - 导出包漏图、覆盖旧版本或 Manifest 不一致；
 - 自动质检故障却将图片标记为通过；
@@ -922,6 +956,7 @@ flowchart LR
 - [ ] 候选入选率、返工率、平均衍生代数；
 - [ ] 每首调用次数、图片数、估算成本和实际成本；
 - [ ] 每个风格版本的入选率和单位成品成本；
+- [x] 每次风格基准测试的样本量、覆盖诗数、实际成本、QC 风险、风格分、跑题率和收藏率；
 - [ ] 每首人工操作时长和总交付周期；
 - [ ] 最终成品数、导出数和覆盖率。
 
@@ -986,12 +1021,12 @@ flowchart LR
 
 按以下顺序启动，避免并行建设互相推翻：
 
-1. [ ] PM：确认首批 20 首试生产名单与 12 首基准诗；
+1. [-] PM：12 首基准诗已固化；仍需确认首批 20 首真实试生产名单；
 2. [ ] PM / AD / CE：拿 3 首诗线下走一遍目标 SOP，补齐门禁；
 3. [ ] PM / PD：完成 8 个一级页面低保真原型；
 4. [ ] BE：输出 SQLite ERD、状态迁移表和旧数据迁移方案；
-5. [ ] AI：提交 Requirement、Direction、QC 三个 JSON Schema；
-6. [ ] AD：提交 Art Bible v1 和 6 个风格包模板；
+5. [-] AI：Requirement、Direction Schema 已提交；QC 仍需补齐语义、历史和美术层合同；
+6. [x] AD：提交结构化 Art Bible v1 和 6 个风格包模板；真实参考四宫格仍作为 EPIC-02B 后续项；
 7. [ ] CE：提交 300 首诗词导入模板和数据质量报告；
 8. [ ] QA：把第 13.2 节转成可执行验收用例；
 9. [ ] BE / FE：优先实现“项目总览 + 诗词导入 + 需求板”，暂停扩展现有单诗生成首页；
@@ -1007,6 +1042,9 @@ flowchart LR
 | `data/state.json` | 只作迁移来源；新版本改用 SQLite |
 | `data/poems.json` | 转为种子 / 导入样例，不作为运行时主数据 |
 | `data/styles.json` | 迁移为 StylePackVersion 初始数据 |
+| `data/art_bible.json` | 作为 ArtBibleVersion 初始数据，运行时以 SQLite 发布版本为准 |
+| `data/benchmark_poems.json` | 作为固定风格验证集，保留误读与历史风险标签 |
+| `style_schema.py` | 保持 Art Bible / StylePack 运行时合同与 JSON Schema 一致 |
 | `public/index.html` | 重构为后台工作台 Shell 与 8 个一级页面容器 |
 | `public/app.js` | 按页面与领域拆分；统一 API Client、Store、Router 和批量选择 |
 | `public/styles.css` | 保留设计 Token，重做高信息密度看板、表格、侧栏和审片布局 |

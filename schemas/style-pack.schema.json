@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fancystudio.local/schemas/style-pack-v1.json",
+  "title": "StylePackV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "style_id",
+    "name",
+    "semantic_version",
+    "description",
+    "prompt_fragment",
+    "release_notes",
+    "art_bible_version_id",
+    "visual_traits",
+    "character_design",
+    "palette",
+    "applicable_topics",
+    "avoid",
+    "risks",
+    "positive_examples",
+    "negative_examples",
+    "settings"
+  ],
+  "properties": {
+    "style_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,79}$"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 120},
+    "short_name": {"type": "string", "maxLength": 80},
+    "semantic_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "prompt_fragment": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "release_notes": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "art_bible_version_id": {"type": "string", "minLength": 1, "maxLength": 120},
+    "visual_traits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "texture", "lighting", "contrast", "saturation", "whitespace"],
+      "properties": {
+        "line": {"type": "string", "minLength": 1},
+        "texture": {"type": "string", "minLength": 1},
+        "lighting": {"type": "string", "minLength": 1},
+        "contrast": {"type": "string", "minLength": 1},
+        "saturation": {"type": "string", "minLength": 1},
+        "whitespace": {"type": "string", "minLength": 1}
+      }
+    },
+    "character_design": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proportion", "expression", "costume"],
+      "properties": {
+        "proportion": {"type": "string", "minLength": 1},
+        "expression": {"type": "string", "minLength": 1},
+        "costume": {"type": "string", "minLength": 1}
+      }
+    },
+    "palette": {"$ref": "#/$defs/colors"},
+    "applicable_topics": {"$ref": "#/$defs/nonEmptyStrings"},
+    "avoid": {"$ref": "#/$defs/nonEmptyStrings"},
+    "risks": {"$ref": "#/$defs/nonEmptyStrings"},
+    "positive_examples": {"$ref": "#/$defs/nonEmptyStrings"},
+    "negative_examples": {"$ref": "#/$defs/nonEmptyStrings"},
+    "settings": {
+      "type": "object",
+      "required": ["background", "foreground", "accent", "paper"],
+      "properties": {
+        "background": {"type": "string", "minLength": 1},
+        "foreground": {"type": "string", "minLength": 1},
+        "accent": {"type": "string", "minLength": 1},
+        "paper": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyStrings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "colors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"}
+    }
+  }
+}

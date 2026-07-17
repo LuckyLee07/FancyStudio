@@ -26,6 +26,13 @@ class TangPoemStudioTests(unittest.TestCase):
         generated_dir.mkdir(parents=True)
         shutil.copy(server.ROOT / "data" / "poems.json", data_dir / "poems.json")
         shutil.copy(server.ROOT / "data" / "styles.json", data_dir / "styles.json")
+        shutil.copy(
+            server.ROOT / "data" / "art_bible.json", data_dir / "art_bible.json"
+        )
+        shutil.copy(
+            server.ROOT / "data" / "benchmark_poems.json",
+            data_dir / "benchmark_poems.json",
+        )
 
         server.DATA_DIR = data_dir
         server.GENERATED_DIR = generated_dir
@@ -78,7 +85,7 @@ class TangPoemStudioTests(unittest.TestCase):
 
         status, bootstrap = self.request_json("/api/bootstrap")
         self.assertEqual(status, 200)
-        self.assertEqual(len(bootstrap["poems"]), 10)
+        self.assertEqual(len(bootstrap["poems"]), 12)
         self.assertEqual(len(bootstrap["styles"]), 6)
         self.assertEqual(len(bootstrap["projects"]), 1)
         self.assertEqual(bootstrap["projects"][0]["id"], server.DEFAULT_PROJECT_ID)
@@ -251,6 +258,8 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(bootstrap["instruction_versions"]), 1)
         self.assertEqual(len(bootstrap["style_packs"]), 6)
+        self.assertEqual(len(bootstrap["style_benchmark_poems"]), 12)
+        self.assertEqual(bootstrap["art_bible"]["semantic_version"], "1.0.0")
         self.assertEqual(bootstrap["provider_status"]["provider"], "demo")
         self.assertIn("anomalies", bootstrap["production_report"])
 
@@ -316,6 +325,9 @@ class TangPoemStudioTests(unittest.TestCase):
                 "name": "水墨留白 API v2",
                 "short_name": "水墨 v2",
                 "description": "测试不可变风格版本",
+                "semantic_version": "1.1.0",
+                "release_notes": "API 风格发布门禁测试。",
+                "art_bible_version_id": bootstrap["art_bible"]["id"],
                 "prompt_fragment": "minimal ink wash with print safe tones",
                 "palette": ["#F0EDE5", "#292E2C"],
                 "settings": {
@@ -325,18 +337,47 @@ class TangPoemStudioTests(unittest.TestCase):
                     "paper": "cool",
                 },
                 "applicable_topics": ["山水"],
+                "visual_traits": {
+                    "line": "干湿并用的墨线",
+                    "texture": "冷调纸纹",
+                    "lighting": "墨色虚实",
+                    "contrast": "局部高对比",
+                    "saturation": "近单色",
+                    "whitespace": "高留白",
+                },
+                "character_design": {
+                    "proportion": "自然比例",
+                    "expression": "克制",
+                    "costume": "唐代服饰轮廓",
+                },
+                "avoid": ["现代器物"],
+                "risks": ["画面过空"],
+                "positive_examples": ["主体虽小但焦点明确"],
+                "negative_examples": ["所有诗都使用孤舟背影"],
                 "actor": {"id": "art-api", "role": "art_director"},
             },
         )
         self.assertEqual(status, 201)
         style_version_id = style_result["style"]["id"]
-        status, style_published = self.request_json(
-            f"/api/style-packs/{style_version_id}/publish",
-            method="POST",
-            payload={"actor": {"id": "art-api", "role": "art_director"}},
-        )
+        with self.assertRaises(urllib.error.HTTPError) as style_gate:
+            self.request_json(
+                f"/api/style-packs/{style_version_id}/publish",
+                method="POST",
+                payload={"actor": {"id": "art-api", "role": "art_director"}},
+            )
+        self.assertEqual(style_gate.exception.code, 409)
+        style_published = json.loads(style_gate.exception.read().decode("utf-8"))
+        self.assertEqual(style_published["code"], "STYLE_BENCHMARK_REQUIRED")
+
+        status, art_schema = self.request_json("/api/schemas/art-bible")
         self.assertEqual(status, 200)
-        self.assertEqual(style_published["style"]["status"], "published")
+        self.assertIn("benchmark_policy", art_schema["required"])
+        status, style_schema = self.request_json("/api/schemas/style-pack")
+        self.assertEqual(status, 200)
+        self.assertIn("semantic_version", style_schema["required"])
+        status, benchmark_poems = self.request_json("/api/style-benchmark-poems")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(benchmark_poems["items"]), 12)
 
         status, provider = self.request_json("/api/provider-status")
         self.assertEqual(status, 200)
@@ -346,9 +387,9 @@ class TangPoemStudioTests(unittest.TestCase):
     def test_sop_api_requirement_direction_and_audit_flow(self):
         status, bootstrap = self.request_json("/api/sop/bootstrap")
         self.assertEqual(status, 200)
-        self.assertEqual(bootstrap["summary"]["total_poems"], 10)
+        self.assertEqual(bootstrap["summary"]["total_poems"], 12)
         self.assertEqual(
-            bootstrap["summary"]["status_counts"]["requirement_draft"], 10
+            bootstrap["summary"]["status_counts"]["requirement_draft"], 12
         )
 
         status, generated = self.request_json(
@@ -672,7 +713,7 @@ class TangPoemStudioTests(unittest.TestCase):
             item for item in candidates if item["status"] == "review_ready"
         )
         self.assertIn(candidate["qc"]["status"], {"pass", "soft_risk"})
-        self.assertEqual(candidate["prompt_template_version"], "demo-six-segment-v2")
+        self.assertEqual(candidate["prompt_template_version"], "demo-six-segment-v3")
         self.assertEqual(len(candidate["prompt_hash"]), 64)
         self.assertIn("instruction", candidate["prompt_segments"])
         self.assertIn("style", candidate["prompt_segments"])
@@ -790,7 +831,7 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertEqual(manifest["assets"][0]["source"]["style"]["version"], 1)
         self.assertEqual(
             manifest["assets"][0]["source"]["prompt_template_version"],
-            "demo-six-segment-v2",
+            "demo-six-segment-v3",
         )
         self.assertEqual(
             len(manifest["assets"][0]["source"]["prompt_hash"]),
@@ -861,7 +902,7 @@ class TangPoemStudioTests(unittest.TestCase):
     def test_demo_worker_completes_a_sixty_image_batch(self):
         store = server.get_sop_store()
         actor = {"id": "load-test", "role": "producer"}
-        poem_ids = [poem["id"] for poem in server.STORE.poems]
+        poem_ids = [poem["id"] for poem in server.STORE.poems[:10]]
         generated = store.generate_requirements(
             server.SOP_DEFAULT_PROJECT_ID, poem_ids, actor=actor
         )

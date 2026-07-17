@@ -27,7 +27,11 @@
 - 诗词、内容版本、指令版本、需求卡、方向方案与审计事件；
 - AI 指令草稿、角色化发布、历史退役与需求版本冻结；
 - 指令版本克隆、与当前发布版逐字段比较，以及带原因的草稿作废；
-- StylePackVersion 草稿 / 发布 / 退役、适用题材、色板与批次快照；
+- Art Bible v1：统一管理色彩、线条、人物比例、空间、材质、文字禁区、历史边界与风格发布政策；
+- StylePack v1：语义化版本、发布说明、Art Bible 绑定、视觉特征、人物规范、适用题材、风险、正反例和生成参数；
+- Style Lab：从 12 首固定基准诗中选择至少 5 首，每首固定生成 4 张小样，记录成本与样本完整性；
+- 风格发布硬门禁：批次完成、样本齐全、风格匹配分和跑题率同时达标后才允许激活；基准图与正式审片、返工、交付链路隔离；
+- StylePackVersion 草稿 / 基准测试 / 激活 / 受限 / 退役状态、发布门禁与批次冻结；
 - Provider 安全状态页：模型能力、并发、超时、重试和配置状态；
 - 7 日生产日报：生成、决策、返工、终审、任务成功率、成本和每日趋势；
 - 异常中心聚合失败、阻塞、QC、预算、导出与卡住任务，并带筛选跳转；
@@ -93,8 +97,8 @@ http://localhost:8000
 
 1. 创建 `data/studio.db`；
 2. 执行数据库迁移；
-3. 导入当前 10 首基准诗和 6 个风格包；
-4. 发布全局创作指令 v1；
+3. 导入当前 12 首基准诗、12 首风格测试集和 6 个基线风格包；
+4. 发布 Art Bible v1 与全局创作指令 v1；
 5. 保留旧原型的演示候选图库。
 
 ## 开启真实图像生成
@@ -129,9 +133,12 @@ FancyStudio/
 ├─ prompt_compiler.py         六段式 Prompt 编译、Provider 模板、来源版本与哈希
 ├─ requirement_schema.py      RequirementCard v1 校验、一次修复与置信度规则
 ├─ direction_schema.py        DirectionProposal v1、事实分层与三方向差异门禁
+├─ style_schema.py            Art Bible v1 / StylePack v1 合同与发布字段校验
 ├─ schemas/
 │  ├─ requirement-card.schema.json  需求卡 JSON Schema
-│  └─ direction-proposal.schema.json 画面方向 JSON Schema
+│  ├─ direction-proposal.schema.json 画面方向 JSON Schema
+│  ├─ art-bible.schema.json         全局视觉圣经 JSON Schema
+│  └─ style-pack.schema.json        风格包 JSON Schema
 ├─ qc_engine.py               离线技术质检、格式解析与相似指纹
 ├─ backup_service.py          数据库与资产备份、校验和安全恢复
 ├─ backup_tool.py             离线备份 / 列表 / 校验 / 恢复命令
@@ -142,6 +149,8 @@ FancyStudio/
 ├─ data/
 │  ├─ studio.db               新生产流程主数据
 │  ├─ poems.json              当前基准诗种子数据
+│  ├─ benchmark_poems.json    12 首风格测试集与误读 / 历史风险标签
+│  ├─ art_bible.json          Art Bible v1 种子数据
 │  ├─ styles.json             当前风格包种子数据
 │  ├─ state.json              旧生成任务与图片数据，待迁入 SQLite
 │  ├─ generated/              本地生成图片
@@ -154,6 +163,7 @@ FancyStudio/
    ├─ test_prompt_compiler.py 确定性编译、来源版本与快照哈希
    ├─ test_requirement_schema.py Schema、修复、缓存、隔离失败与恢复
    ├─ test_direction_schema.py 三方向合同、差异门禁、原子写入与恢复
+   ├─ test_style_schema.py    Art Bible / StylePack 合同与语义版本校验
    ├─ test_frontend_contract.py 页面与脚本契约
    └─ test_server.py          HTTP API、生成、编辑、评审与完整流程
 ```
@@ -201,6 +211,8 @@ python3 -m unittest discover -s tests -v
 - 重复导出不覆盖、Manifest 全链路与文件校验和；
 - 数据库 / 资产备份、校验和空目录恢复；
 - 指令 / 风格不可变版本、发布门禁及批次冻结回归；
+- Art Bible / StylePack 合同、12 首基准集、每诗 4 张样本、评分阈值和风格发布门禁；
+- 风格基准图与正式审片、返工、成品及生产日报隔离；
 - 指令克隆、差异审阅和带原因草稿作废；
 - 六段式 Prompt 编译快照、哈希和 Manifest 贯通；
 - 300 首数据、1000 任务批次、分页、总览与报表性能门禁；
@@ -213,9 +225,9 @@ python3 -m unittest discover -s tests -v
 
 ## 当前边界
 
-- 当前种子数据为 10 首基准诗，尚未导入完整 300 首生产数据；
+- 当前种子数据为 12 首基准诗，尚未导入完整 300 首生产数据；
 - Requirement 与 Direction 当前使用可测试的结构化本地策划器，真实文本模型适配将在后续接入；
-- 风格版本发布目前由美术指导确认，发布前基准诗自动评测仍待实现；
+- 风格基准流程已强制样本数量与人工评分门槛；语义风格匹配、跑题和构图多样性仍需视觉模型与人工标注集校准；
 - 当前本地 QC 已覆盖可证明的技术检查；栅格文字 / 品牌识别以及语义、历史、美术模型仍需后续视觉模型和人工标注集校准；
 - 当前只支持纯图导出，诗卡、课程配图和多规格派生仍待实现；
 - 当前为单机单用户版本；岗位切换用于本地 SOP 分工演示和服务端门禁联调，不是身份认证，也不具备公网部署所需的登录、完整权限和速率限制；

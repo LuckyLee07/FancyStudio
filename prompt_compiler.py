@@ -8,8 +8,8 @@ from typing import Any
 
 
 TEMPLATE_VERSIONS = {
-    "demo": "demo-six-segment-v2",
-    "openai": "openai-six-segment-v2",
+    "demo": "demo-six-segment-v3",
+    "openai": "openai-six-segment-v3",
 }
 
 RATIO_SPECS = {
@@ -61,6 +61,13 @@ def build_segments(payload: dict[str, Any]) -> dict[str, Any]:
         raise PromptCompileError("PROMPT_STYLE_MISSING", "Prompt 缺少已发布风格片段。")
     if not str(instruction_content.get("visual_goal") or "").strip():
         raise PromptCompileError("PROMPT_INSTRUCTION_MISSING", "Prompt 缺少全局视觉目标。")
+    art_bible = style.get("art_bible")
+    if not isinstance(art_bible, dict) or not isinstance(
+        art_bible.get("content"), dict
+    ):
+        raise PromptCompileError(
+            "PROMPT_ART_BIBLE_MISSING", "Prompt 缺少风格版本绑定的 Art Bible。"
+        )
     for field in (
         "visual_thesis",
         "scene",
@@ -131,9 +138,22 @@ def build_segments(payload: dict[str, Any]) -> dict[str, Any]:
             "id": style.get("id"),
             "version_id": style.get("version_id"),
             "version": style.get("version"),
+            "semantic_version": style.get("semantic_version"),
+            "schema_version": style.get("schema_version"),
             "name": style.get("name"),
             "prompt_fragment": style.get("prompt_fragment"),
             "palette": _clean_list(style.get("palette")),
+            "visual_traits": style.get("visual_traits") or {},
+            "character_design": style.get("character_design") or {},
+            "avoid": _clean_list(style.get("avoid")),
+            "risks": _clean_list(style.get("risks")),
+            "art_bible": {
+                "id": art_bible.get("id"),
+                "version": art_bible.get("version"),
+                "semantic_version": art_bible.get("semantic_version"),
+                "schema_version": art_bible.get("schema_version"),
+                "content": art_bible.get("content") or {},
+            },
         },
         "output": {
             "aspect_ratio": aspect_ratio,
@@ -192,6 +212,11 @@ def _render_text(segments: dict[str, Any], provider: str) -> str:
         for item in layers.get("creative_choices", [])
         if isinstance(item, dict) and str(item.get("claim") or "").strip()
     ]
+    art_bible = style.get("art_bible") or {}
+    art_rules = art_bible.get("content") or {}
+    traits = style.get("visual_traits") or {}
+    character = style.get("character_design") or {}
+    style_version_label = style.get("semantic_version") or f"v{style.get('version')}"
     blocks = [
         (
             "[01 CONTENT / 诗词正文]\n"
@@ -223,9 +248,14 @@ def _render_text(segments: dict[str, Any], provider: str) -> str:
         ),
         (
             "[04 STYLE / 冻结风格版本]\n"
-            f"{style.get('name') or style.get('id')} v{style.get('version')}\n"
+            f"{style.get('name') or style.get('id')} {style_version_label}\n"
             f"{style.get('prompt_fragment')}\n"
-            f"色板：{_join(style.get('palette'))}"
+            f"色板：{_join(style.get('palette'))}\n"
+            f"线条：{traits.get('line') or '未指定'}；材质：{traits.get('texture') or '未指定'}；"
+            f"光线：{traits.get('lighting') or '未指定'}\n"
+            f"人物比例：{character.get('proportion') or '未指定'}；表情：{character.get('expression') or '未指定'}；"
+            f"服饰：{character.get('costume') or '未指定'}\n"
+            f"风格禁用：{_join(style.get('avoid'))}；已知风险：{_join(style.get('risks'))}"
         ),
         (
             "[05 OUTPUT / 输出规格]\n"
@@ -239,7 +269,12 @@ def _render_text(segments: dict[str, Any], provider: str) -> str:
             f"视觉目标：{instruction.get('visual_goal')}\n"
             f"构图原则：{_join(instruction.get('composition_rules'))}\n"
             f"历史原则：{_join(instruction.get('historical_rules'))}\n"
-            f"全局禁用：{_join(instruction.get('global_avoid'))}"
+            f"全局禁用：{_join(instruction.get('global_avoid'))}\n"
+            f"Art Bible {art_bible.get('semantic_version') or '未记录'} · "
+            f"色彩：{_join(art_rules.get('palette_rules'))}\n"
+            f"空间：{_join(art_rules.get('spatial_rules'))}\n"
+            f"文字禁令：{_join(art_rules.get('text_prohibitions'))}\n"
+            f"历史边界：{_join(art_rules.get('historical_boundaries'))}"
         ),
     ]
     if "rework" in segments:
@@ -293,5 +328,7 @@ def compile_generation_prompt(
             "direction_schema_version": segments["direction"].get("schema_version"),
             "direction_generation_run_id": segments["direction"].get("generation_run_id"),
             "style_version_id": segments["style"].get("version_id"),
+            "style_schema_version": segments["style"].get("schema_version"),
+            "art_bible_version_id": (segments["style"].get("art_bible") or {}).get("id"),
         },
     }

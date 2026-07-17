@@ -33,6 +33,12 @@ from requirement_schema import (
     validate_requirement_card,
     validate_with_single_repair,
 )
+from style_schema import (
+    ART_BIBLE_SCHEMA_VERSION,
+    STYLE_PACK_SCHEMA_VERSION,
+    validate_art_bible,
+    validate_style_pack,
+)
 
 
 DEFAULT_PROJECT_ID = "tang-300-production"
@@ -60,7 +66,16 @@ REQUIREMENT_STATUSES = {"draft", "in_review", "approved", "rejected"}
 DIRECTION_STATUSES = {"draft", "in_review", "approved", "rejected", "disabled"}
 DIRECTION_TYPES = ("narrative", "atmospheric", "symbolic")
 INSTRUCTION_STATUSES = {"draft", "published", "retired"}
-STYLE_PACK_STATUSES = {"draft", "published", "retired"}
+ART_BIBLE_STATUSES = {"draft", "published", "retired"}
+STYLE_PACK_STATUSES = {"draft", "benchmarking", "active", "limited", "retired"}
+STYLE_BENCHMARK_STATUSES = {
+    "draft",
+    "running",
+    "awaiting_evaluation",
+    "passed",
+    "failed",
+    "cancelled",
+}
 
 BATCH_STATUSES = {
     "draft",
@@ -196,6 +211,10 @@ class SopStore:
         self.database_path = database_path.resolve()
         self.poem_seed_path = poem_seed_path.resolve()
         self.style_seed_path = style_seed_path.resolve()
+        self.art_bible_seed_path = self.style_seed_path.parent / "art_bible.json"
+        self.benchmark_poem_seed_path = (
+            self.poem_seed_path.parent / "benchmark_poems.json"
+        )
         self.lock = threading.RLock()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
@@ -869,6 +888,123 @@ class SopStore:
                     COMMIT;
                     """
                 )
+            if 10 not in applied:
+                connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+
+                    CREATE TABLE art_bible_versions (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        version INTEGER NOT NULL,
+                        semantic_version TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        schema_version TEXT NOT NULL,
+                        content_json TEXT NOT NULL,
+                        release_notes TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        published_at TEXT,
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(project_id, version),
+                        UNIQUE(project_id, semantic_version)
+                    );
+
+                    CREATE INDEX idx_art_bible_project_status
+                    ON art_bible_versions(project_id, status, version);
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN semantic_version TEXT NOT NULL DEFAULT 'legacy';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN schema_version TEXT NOT NULL DEFAULT 'legacy';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN release_notes TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN art_bible_version_id TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN visual_traits_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN character_design_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN avoid_json TEXT NOT NULL DEFAULT '[]';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN risks_json TEXT NOT NULL DEFAULT '[]';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN positive_examples_json TEXT NOT NULL DEFAULT '[]';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN negative_examples_json TEXT NOT NULL DEFAULT '[]';
+
+                    ALTER TABLE style_pack_versions
+                    ADD COLUMN benchmark_waived INTEGER NOT NULL DEFAULT 0;
+
+                    ALTER TABLE generation_batches
+                    ADD COLUMN purpose TEXT NOT NULL DEFAULT 'production';
+
+                    ALTER TABLE generation_batches
+                    ADD COLUMN benchmark_run_id TEXT NOT NULL DEFAULT '';
+
+                    UPDATE style_pack_versions
+                    SET status = 'active'
+                    WHERE status = 'published';
+
+                    CREATE UNIQUE INDEX idx_style_pack_semantic_version
+                    ON style_pack_versions(project_id, style_id, semantic_version)
+                    WHERE semantic_version != 'legacy';
+
+                    CREATE TABLE style_benchmark_poems (
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        poem_id TEXT NOT NULL REFERENCES poems(id),
+                        categories_json TEXT NOT NULL DEFAULT '[]',
+                        misread_risks_json TEXT NOT NULL DEFAULT '[]',
+                        historical_risks_json TEXT NOT NULL DEFAULT '[]',
+                        is_active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(project_id, poem_id)
+                    );
+
+                    CREATE INDEX idx_style_benchmark_poems_active
+                    ON style_benchmark_poems(project_id, is_active, poem_id);
+
+                    CREATE TABLE style_benchmark_runs (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        style_version_id TEXT NOT NULL REFERENCES style_pack_versions(id),
+                        art_bible_version_id TEXT NOT NULL REFERENCES art_bible_versions(id),
+                        batch_id TEXT REFERENCES generation_batches(id),
+                        status TEXT NOT NULL,
+                        poem_ids_json TEXT NOT NULL DEFAULT '[]',
+                        policy_json TEXT NOT NULL DEFAULT '{}',
+                        metrics_json TEXT NOT NULL DEFAULT '{}',
+                        gate_json TEXT NOT NULL DEFAULT '{}',
+                        notes TEXT NOT NULL DEFAULT '',
+                        created_by TEXT NOT NULL,
+                        evaluated_by TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    );
+
+                    CREATE INDEX idx_style_benchmark_runs_version_created
+                    ON style_benchmark_runs(style_version_id, created_at);
+
+                    CREATE INDEX idx_style_benchmark_runs_project_status
+                    ON style_benchmark_runs(project_id, status, created_at);
+
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (10, CURRENT_TIMESTAMP);
+
+                    COMMIT;
+                    """
+                )
 
     def _recover_interrupted_work(self) -> None:
         """Make crash recovery explicit without automatically repeating billed work."""
@@ -962,6 +1098,8 @@ class SopStore:
     def _seed(self) -> None:
         poems = self._read_seed(self.poem_seed_path)
         styles = self._read_seed(self.style_seed_path)
+        art_bibles = self._read_seed(self.art_bible_seed_path)
+        benchmark_poems = self._read_seed(self.benchmark_poem_seed_path)
         now = utc_now()
         default_style = styles[0]["id"] if styles else ""
         instruction_content = {
@@ -1064,16 +1202,86 @@ class SopStore:
                         now,
                     ),
                 )
+                for art_bible in art_bibles:
+                    content = art_bible.get("content") or {}
+                    issues = validate_art_bible(content)
+                    if issues:
+                        raise RuntimeError(
+                            f"Art Bible seed contract invalid: {issues[0]['message']}"
+                        )
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO art_bible_versions(
+                            id, project_id, version, semantic_version, name,
+                            schema_version, content_json, release_notes, status,
+                            published_at, created_by, created_at
+                        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'published', ?, 'seed', ?)
+                        """,
+                        (
+                            art_bible["id"],
+                            DEFAULT_PROJECT_ID,
+                            art_bible.get("semantic_version", "1.0.0"),
+                            art_bible.get("name", "唐诗三百首全局美术圣经 v1"),
+                            ART_BIBLE_SCHEMA_VERSION,
+                            _json(content),
+                            art_bible.get("release_notes", "首版全局美术规范。"),
+                            now,
+                            now,
+                        ),
+                    )
+                published_art_bible = connection.execute(
+                    """
+                    SELECT id FROM art_bible_versions
+                    WHERE project_id = ? AND status = 'published'
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (DEFAULT_PROJECT_ID,),
+                ).fetchone()
+                art_bible_version_id = (
+                    published_art_bible["id"] if published_art_bible else ""
+                )
                 for style in styles:
+                    style_payload = {
+                        "style_id": style["id"],
+                        "name": style.get("name", style["id"]),
+                        "short_name": style.get("short_name", ""),
+                        "semantic_version": style.get("semantic_version", "1.0.0"),
+                        "description": style.get("description", ""),
+                        "prompt_fragment": style.get("prompt_fragment", ""),
+                        "release_notes": style.get("release_notes", "首版风格基线。"),
+                        "art_bible_version_id": art_bible_version_id,
+                        "visual_traits": style.get("visual_traits", {}),
+                        "character_design": style.get("character_design", {}),
+                        "palette": style.get("palette", []),
+                        "applicable_topics": style.get("applicable_topics", ["通用"]),
+                        "avoid": style.get("avoid", []),
+                        "risks": style.get("risks", []),
+                        "positive_examples": style.get("positive_examples", []),
+                        "negative_examples": style.get("negative_examples", []),
+                        "settings": {
+                            key: style.get(key, "")
+                            for key in ("background", "foreground", "accent", "paper")
+                        },
+                    }
+                    issues = validate_style_pack(style_payload)
+                    if issues:
+                        raise RuntimeError(
+                            f"Style seed {style['id']} invalid: {issues[0]['message']}"
+                        )
                     connection.execute(
                         """
                         INSERT OR IGNORE INTO style_pack_versions(
                             id, project_id, style_id, version, name, short_name,
                             description, prompt_fragment, palette_json,
                             settings_json, applicable_topics_json, status,
-                            published_at, created_by, created_at
-                        ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'published',
-                                  ?, 'seed', ?)
+                            published_at, created_by, created_at,
+                            semantic_version, schema_version, release_notes,
+                            art_bible_version_id, visual_traits_json,
+                            character_design_json, avoid_json, risks_json,
+                            positive_examples_json, negative_examples_json,
+                            benchmark_waived
+                        ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'active',
+                                  ?, 'seed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                         """,
                         (
                             f"stylev_{style['id']}_v1",
@@ -1097,6 +1305,64 @@ class SopStore:
                             ),
                             _json(style.get("applicable_topics", ["通用"])),
                             now,
+                            now,
+                            style_payload["semantic_version"],
+                            STYLE_PACK_SCHEMA_VERSION,
+                            style_payload["release_notes"],
+                            art_bible_version_id,
+                            _json(style_payload["visual_traits"]),
+                            _json(style_payload["character_design"]),
+                            _json(style_payload["avoid"]),
+                            _json(style_payload["risks"]),
+                            _json(style_payload["positive_examples"]),
+                            _json(style_payload["negative_examples"]),
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE style_pack_versions
+                        SET semantic_version = ?, schema_version = ?,
+                            release_notes = ?, art_bible_version_id = ?,
+                            visual_traits_json = ?, character_design_json = ?,
+                            avoid_json = ?, risks_json = ?,
+                            positive_examples_json = ?, negative_examples_json = ?,
+                            benchmark_waived = 1,
+                            status = CASE WHEN status = 'published' THEN 'active'
+                                          ELSE status END
+                        WHERE id = ? AND created_by = 'seed'
+                        """,
+                        (
+                            style_payload["semantic_version"],
+                            STYLE_PACK_SCHEMA_VERSION,
+                            style_payload["release_notes"],
+                            art_bible_version_id,
+                            _json(style_payload["visual_traits"]),
+                            _json(style_payload["character_design"]),
+                            _json(style_payload["avoid"]),
+                            _json(style_payload["risks"]),
+                            _json(style_payload["positive_examples"]),
+                            _json(style_payload["negative_examples"]),
+                            f"stylev_{style['id']}_v1",
+                        ),
+                    )
+                for benchmark in benchmark_poems:
+                    poem_id = str(benchmark.get("poem_id") or "")
+                    if not poem_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO style_benchmark_poems(
+                            project_id, poem_id, categories_json,
+                            misread_risks_json, historical_risks_json,
+                            is_active, created_at
+                        ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                        """,
+                        (
+                            DEFAULT_PROJECT_ID,
+                            poem_id,
+                            _json(benchmark.get("categories", [])),
+                            _json(benchmark.get("misread_risks", [])),
+                            _json(benchmark.get("historical_risks", [])),
                             now,
                         ),
                     )
@@ -1256,6 +1522,12 @@ class SopStore:
         return item
 
     @staticmethod
+    def _art_bible_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["content"] = _decode(item.pop("content_json", None), {})
+        return item
+
+    @staticmethod
     def _style_pack_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         item = dict(row)
         item["palette"] = _decode(item.pop("palette_json", None), [])
@@ -1263,6 +1535,43 @@ class SopStore:
         item["applicable_topics"] = _decode(
             item.pop("applicable_topics_json", None), []
         )
+        item["visual_traits"] = _decode(item.pop("visual_traits_json", None), {})
+        item["character_design"] = _decode(
+            item.pop("character_design_json", None), {}
+        )
+        item["avoid"] = _decode(item.pop("avoid_json", None), [])
+        item["risks"] = _decode(item.pop("risks_json", None), [])
+        item["positive_examples"] = _decode(
+            item.pop("positive_examples_json", None), []
+        )
+        item["negative_examples"] = _decode(
+            item.pop("negative_examples_json", None), []
+        )
+        item["benchmark_waived"] = bool(item.get("benchmark_waived"))
+        return item
+
+    @staticmethod
+    def _benchmark_poem_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["categories"] = _decode(item.pop("categories_json", None), [])
+        item["misread_risks"] = _decode(
+            item.pop("misread_risks_json", None), []
+        )
+        item["historical_risks"] = _decode(
+            item.pop("historical_risks_json", None), []
+        )
+        item["is_active"] = bool(item.get("is_active"))
+        return item
+
+    @staticmethod
+    def _style_benchmark_run_dict(
+        row: sqlite3.Row | dict[str, Any],
+    ) -> dict[str, Any]:
+        item = dict(row)
+        item["poem_ids"] = _decode(item.pop("poem_ids_json", None), [])
+        item["policy"] = _decode(item.pop("policy_json", None), {})
+        item["metrics"] = _decode(item.pop("metrics_json", None), {})
+        item["gate"] = _decode(item.pop("gate_json", None), {})
         return item
 
     @staticmethod
@@ -1454,6 +1763,7 @@ class SopStore:
                     FROM generation_tasks t
                     JOIN generation_batches b ON b.id = t.batch_id
                     WHERE b.project_id = ?
+                      AND b.purpose != 'style_benchmark'
                       AND COALESCE(t.finished_at, t.updated_at) >= ?
                     """,
                     (project_id, cutoff),
@@ -1461,8 +1771,11 @@ class SopStore:
             )
             generated = connection.execute(
                 """
-                SELECT COUNT(*) AS count FROM production_images
-                WHERE project_id = ? AND created_at >= ?
+                SELECT COUNT(*) AS count
+                FROM production_images i
+                JOIN generation_batches b ON b.id = i.batch_id
+                WHERE i.project_id = ? AND b.purpose != 'style_benchmark'
+                  AND i.created_at >= ?
                 """,
                 (project_id, cutoff),
             ).fetchone()["count"]
@@ -1471,7 +1784,9 @@ class SopStore:
                 SELECT COUNT(*) AS count
                 FROM review_decisions r
                 JOIN production_images i ON i.id = r.image_id
-                WHERE i.project_id = ? AND r.created_at >= ?
+                JOIN generation_batches b ON b.id = i.batch_id
+                WHERE i.project_id = ? AND b.purpose != 'style_benchmark'
+                  AND r.created_at >= ?
                 """,
                 (project_id, cutoff),
             ).fetchone()["count"]
@@ -1502,7 +1817,8 @@ class SopStore:
                 SELECT COALESCE(SUM(u.actual_cost), 0) AS cost
                 FROM usage_records u
                 JOIN generation_batches b ON b.id = u.batch_id
-                WHERE b.project_id = ? AND u.created_at >= ?
+                WHERE b.project_id = ? AND b.purpose != 'style_benchmark'
+                  AND u.created_at >= ?
                 """,
                 (project_id, cutoff),
             ).fetchone()["cost"]
@@ -1514,6 +1830,7 @@ class SopStore:
                 FROM generation_tasks t
                 JOIN generation_batches b ON b.id = t.batch_id
                 WHERE b.project_id = ?
+                  AND b.purpose != 'style_benchmark'
                   AND COALESCE(t.finished_at, t.updated_at) >= ?
                 GROUP BY day
                 """,
@@ -1521,9 +1838,11 @@ class SopStore:
             ).fetchall()
             image_daily = connection.execute(
                 """
-                SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS generated
-                FROM production_images
-                WHERE project_id = ? AND created_at >= ? GROUP BY day
+                SELECT substr(i.created_at, 1, 10) AS day, COUNT(*) AS generated
+                FROM production_images i
+                JOIN generation_batches b ON b.id = i.batch_id
+                WHERE i.project_id = ? AND b.purpose != 'style_benchmark'
+                  AND i.created_at >= ? GROUP BY day
                 """,
                 (project_id, cutoff),
             ).fetchall()
@@ -1541,7 +1860,8 @@ class SopStore:
                        COUNT(*) AS count
                 FROM generation_tasks t
                 JOIN generation_batches b ON b.id = t.batch_id
-                WHERE b.project_id = ? AND t.status IN ('failed', 'blocked')
+                WHERE b.project_id = ? AND b.purpose != 'style_benchmark'
+                  AND t.status IN ('failed', 'blocked')
                   AND t.updated_at >= ?
                 GROUP BY code ORDER BY count DESC LIMIT 10
                 """,
@@ -1551,16 +1871,16 @@ class SopStore:
                 connection.execute(
                     """
                     SELECT
-                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND t.status='failed') AS failed_tasks,
-                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND t.status='blocked') AS blocked_tasks,
-                      (SELECT COUNT(*) FROM production_images WHERE project_id=? AND status='qc_blocked') AS qc_blocked,
-                      (SELECT COUNT(*) FROM production_images WHERE project_id=? AND status='needs_manual_qc') AS manual_qc,
-                      (SELECT COUNT(*) FROM generation_batches WHERE project_id=? AND status='budget_blocked') AS budget_blocked,
+                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND b.purpose!='style_benchmark' AND t.status='failed') AS failed_tasks,
+                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND b.purpose!='style_benchmark' AND t.status='blocked') AS blocked_tasks,
+                      (SELECT COUNT(*) FROM production_images i JOIN generation_batches b ON b.id=i.batch_id WHERE i.project_id=? AND b.purpose!='style_benchmark' AND i.status='qc_blocked') AS qc_blocked,
+                      (SELECT COUNT(*) FROM production_images i JOIN generation_batches b ON b.id=i.batch_id WHERE i.project_id=? AND b.purpose!='style_benchmark' AND i.status='needs_manual_qc') AS manual_qc,
+                      (SELECT COUNT(*) FROM generation_batches WHERE project_id=? AND purpose!='style_benchmark' AND status='budget_blocked') AS budget_blocked,
                       (SELECT COUNT(*) FROM export_packages WHERE project_id=? AND status='failed') AS failed_exports,
                       (SELECT COUNT(*) FROM requirement_generation_runs WHERE project_id=? AND status='failed' AND resolved_at IS NULL) AS failed_requirement_runs,
                       (SELECT COUNT(*) FROM direction_generation_runs WHERE project_id=? AND status='failed' AND resolved_at IS NULL) AS failed_direction_runs,
                       (SELECT COUNT(*) FROM poems WHERE project_id=? AND status='blocked') AS blocked_poems,
-                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND t.status='running' AND t.updated_at < ?) AS stale_tasks
+                      (SELECT COUNT(*) FROM generation_tasks t JOIN generation_batches b ON b.id=t.batch_id WHERE b.project_id=? AND b.purpose!='style_benchmark' AND t.status='running' AND t.updated_at < ?) AS stale_tasks
                     """,
                     (
                         project_id,
@@ -2781,6 +3101,275 @@ class SopStore:
                 connection.execute("ROLLBACK")
                 raise
 
+    def art_bible_versions(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> list[dict[str, Any]]:
+        self.project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM art_bible_versions
+                WHERE project_id = ?
+                ORDER BY version DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._art_bible_dict(row) for row in rows]
+
+    def published_art_bible(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM art_bible_versions
+                WHERE project_id = ? AND status = 'published'
+                ORDER BY version DESC LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+        if not row:
+            raise WorkflowError(
+                "PUBLISHED_ART_BIBLE_REQUIRED",
+                "项目缺少已发布的 Art Bible。",
+                status=409,
+            )
+        return self._art_bible_dict(row)
+
+    def create_art_bible_version(
+        self,
+        project_id: str,
+        *,
+        semantic_version: str,
+        name: str,
+        content: dict[str, Any] | None,
+        release_notes: str,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.project(project_id)
+        actor_id, actor_role = self._actor(actor)
+        if actor_role not in {"art_director", "producer", "system_admin"}:
+            raise WorkflowError(
+                "ART_BIBLE_ROLE_REQUIRED",
+                "只有美术指导、制片人或系统管理员可以创建 Art Bible。",
+                status=403,
+            )
+        semantic_version = str(semantic_version).strip()[:40]
+        if not re.fullmatch(
+            r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)",
+            semantic_version,
+        ):
+            raise WorkflowError("INVALID_SEMVER", "语义版本必须使用 MAJOR.MINOR.PATCH。")
+        name = str(name).strip()[:120]
+        release_notes = str(release_notes).strip()[:1000]
+        if not name or not release_notes:
+            raise WorkflowError(
+                "ART_BIBLE_METADATA_REQUIRED", "名称和发布说明不能为空。"
+            )
+        issues = validate_art_bible(content)
+        if issues:
+            raise WorkflowError(
+                "ART_BIBLE_SCHEMA_INVALID",
+                issues[0]["message"],
+                status=422,
+            )
+        version_id = _new_id("artbible")
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                duplicate = connection.execute(
+                    """
+                    SELECT id FROM art_bible_versions
+                    WHERE project_id = ? AND semantic_version = ?
+                    """,
+                    (project_id, semantic_version),
+                ).fetchone()
+                if duplicate:
+                    raise WorkflowError(
+                        "ART_BIBLE_SEMVER_EXISTS",
+                        "该 Art Bible 语义版本已存在。",
+                        status=409,
+                    )
+                version = int(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(MAX(version), 0) + 1 AS version
+                        FROM art_bible_versions WHERE project_id = ?
+                        """,
+                        (project_id,),
+                    ).fetchone()["version"]
+                )
+                connection.execute(
+                    """
+                    INSERT INTO art_bible_versions(
+                        id, project_id, version, semantic_version, name,
+                        schema_version, content_json, release_notes, status,
+                        created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                    """,
+                    (
+                        version_id,
+                        project_id,
+                        version,
+                        semantic_version,
+                        name,
+                        ART_BIBLE_SCHEMA_VERSION,
+                        _json(content),
+                        release_notes,
+                        actor_id,
+                        now,
+                    ),
+                )
+                result = self._art_bible_dict(
+                    connection.execute(
+                        "SELECT * FROM art_bible_versions WHERE id = ?",
+                        (version_id,),
+                    ).fetchone()
+                )
+                self._audit(
+                    connection,
+                    actor=actor,
+                    action="art_bible.created",
+                    target_type="art_bible_version",
+                    target_id=version_id,
+                    after=result,
+                )
+                connection.execute("COMMIT")
+                return result
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def publish_art_bible_version(
+        self,
+        version_id: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _, actor_role = self._actor(actor)
+        if actor_role not in {"art_director", "producer", "system_admin"}:
+            raise WorkflowError(
+                "ART_BIBLE_PUBLISH_ROLE_REQUIRED",
+                "只有美术指导、制片人或系统管理员可以发布 Art Bible。",
+                status=403,
+            )
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM art_bible_versions WHERE id = ?",
+                    (version_id,),
+                ).fetchone()
+                if not row:
+                    raise WorkflowError(
+                        "ART_BIBLE_NOT_FOUND", "Art Bible 版本不存在。", status=404
+                    )
+                if row["status"] == "published":
+                    connection.execute("COMMIT")
+                    return self._art_bible_dict(row)
+                if row["status"] != "draft":
+                    raise WorkflowError(
+                        "INVALID_ART_BIBLE_STATE", "只有草稿 Art Bible 可以发布。", status=409
+                    )
+                issues = validate_art_bible(_decode(row["content_json"], {}))
+                if issues:
+                    raise WorkflowError(
+                        "ART_BIBLE_SCHEMA_INVALID", issues[0]["message"], status=422
+                    )
+                connection.execute(
+                    """
+                    UPDATE art_bible_versions SET status = 'retired'
+                    WHERE project_id = ? AND status = 'published'
+                    """,
+                    (row["project_id"],),
+                )
+                connection.execute(
+                    """
+                    UPDATE art_bible_versions
+                    SET status = 'published', published_at = ? WHERE id = ?
+                    """,
+                    (now, version_id),
+                )
+                result = self._art_bible_dict(
+                    connection.execute(
+                        "SELECT * FROM art_bible_versions WHERE id = ?",
+                        (version_id,),
+                    ).fetchone()
+                )
+                self._audit(
+                    connection,
+                    actor=actor,
+                    action="art_bible.published",
+                    target_type="art_bible_version",
+                    target_id=version_id,
+                    before=self._art_bible_dict(row),
+                    after=result,
+                )
+                connection.execute("COMMIT")
+                return result
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def benchmark_poems(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> list[dict[str, Any]]:
+        self.project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT bp.*, p.title, p.author, p.theme, p.status AS poem_status
+                FROM style_benchmark_poems bp
+                JOIN poems p ON p.id = bp.poem_id
+                WHERE bp.project_id = ? AND bp.is_active = 1
+                ORDER BY p.title
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._benchmark_poem_dict(row) for row in rows]
+
+    def _style_release_gate_locked(
+        self,
+        connection: sqlite3.Connection,
+        style_row: sqlite3.Row | dict[str, Any],
+    ) -> dict[str, Any]:
+        if bool(style_row["benchmark_waived"]):
+            return {
+                "passed": True,
+                "code": "SEEDED_BASELINE_WAIVER",
+                "message": "内置 v1 基线按迁移豁免保留；后续版本必须完成基准测试。",
+                "run_id": "",
+            }
+        run = connection.execute(
+            """
+            SELECT * FROM style_benchmark_runs
+            WHERE style_version_id = ? AND status = 'passed'
+              AND art_bible_version_id = ?
+            ORDER BY completed_at DESC, created_at DESC LIMIT 1
+            """,
+            (style_row["id"], style_row["art_bible_version_id"]),
+        ).fetchone()
+        if not run:
+            return {
+                "passed": False,
+                "code": "STYLE_BENCHMARK_REQUIRED",
+                "message": "发布前必须完成当前 Art Bible 下的 5 首以上基准诗测试。",
+                "run_id": "",
+            }
+        gate = _decode(run["gate_json"], {})
+        return {
+            "passed": bool(gate.get("passed")),
+            "code": str(gate.get("code") or "STYLE_BENCHMARK_FAILED"),
+            "message": str(gate.get("message") or "基准测试未通过发布门槛。"),
+            "run_id": run["id"],
+            "metrics": _decode(run["metrics_json"], {}),
+        }
+
     def style_pack_versions(
         self,
         project_id: str = DEFAULT_PROJECT_ID,
@@ -2804,7 +3393,44 @@ class SopStore:
                 """,
                 params,
             ).fetchall()
-        return [self._style_pack_dict(row) for row in rows]
+        items = []
+        with self._connect() as connection:
+            for row in rows:
+                item = self._style_pack_dict(row)
+                item["release_gate"] = self._style_release_gate_locked(connection, row)
+                latest_run = connection.execute(
+                    """
+                    SELECT r.*, b.status AS batch_status
+                    FROM style_benchmark_runs r
+                    LEFT JOIN generation_batches b ON b.id = r.batch_id
+                    WHERE r.style_version_id = ?
+                    ORDER BY r.created_at DESC LIMIT 1
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                if latest_run:
+                    benchmark = self._style_benchmark_run_dict(latest_run)
+                    effective = benchmark["status"]
+                    if effective in {"draft", "running"}:
+                        if benchmark.get("batch_status") == "completed":
+                            effective = "awaiting_evaluation"
+                        elif benchmark.get("batch_status") in {
+                            "partially_failed",
+                            "cancelled",
+                        }:
+                            effective = "failed"
+                        elif benchmark.get("batch_status") in {
+                            "queued",
+                            "running",
+                            "paused",
+                        }:
+                            effective = "running"
+                    benchmark["effective_status"] = effective
+                    item["latest_benchmark"] = benchmark
+                else:
+                    item["latest_benchmark"] = None
+                items.append(item)
+        return items
 
     def published_style_pack(
         self,
@@ -2815,7 +3441,8 @@ class SopStore:
             row = connection.execute(
                 """
                 SELECT * FROM style_pack_versions
-                WHERE project_id = ? AND style_id = ? AND status = 'published'
+                WHERE project_id = ? AND style_id = ?
+                  AND status IN ('active', 'limited')
                 ORDER BY version DESC LIMIT 1
                 """,
                 (project_id, str(style_id).strip()[:80]),
@@ -2844,10 +3471,19 @@ class SopStore:
         name: str,
         short_name: str = "",
         description: str = "",
+        semantic_version: str,
+        release_notes: str,
+        art_bible_version_id: str,
         prompt_fragment: str,
         palette: list[str] | None = None,
         settings: dict[str, Any] | None = None,
         applicable_topics: list[str] | None = None,
+        visual_traits: dict[str, Any] | None = None,
+        character_design: dict[str, Any] | None = None,
+        avoid: list[str] | None = None,
+        risks: list[str] | None = None,
+        positive_examples: list[str] | None = None,
+        negative_examples: list[str] | None = None,
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.project(project_id)
@@ -2858,37 +3494,63 @@ class SopStore:
                 "只有美术指导、制片人或系统管理员可以创建风格版本。",
                 status=403,
             )
-        style_id = str(style_id).strip().lower()[:80]
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,79}", style_id):
-            raise WorkflowError(
-                "INVALID_STYLE_ID", "风格 ID 仅支持小写字母、数字和连字符。"
-            )
-        name = str(name).strip()[:120]
-        prompt_fragment = str(prompt_fragment).strip()[:4000]
-        if not name or not prompt_fragment:
-            raise WorkflowError(
-                "STYLE_CORE_REQUIRED", "风格名称和 Prompt 片段不能为空。"
-            )
-        palette_items = self._normalize_string_list(palette, "palette", 12)
-        for color in palette_items:
-            if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
-                raise WorkflowError("INVALID_PALETTE", f"无效色值：{color}")
-        if settings is None:
-            settings = {}
-        if not isinstance(settings, dict):
-            raise WorkflowError("INVALID_STYLE_SETTINGS", "风格设置必须是对象。")
-        safe_settings = {
-            key: str(settings.get(key) or "").strip()[:100]
-            for key in ("background", "foreground", "accent", "paper")
+        style_payload = {
+            "style_id": str(style_id).strip().lower()[:80],
+            "name": str(name).strip()[:120],
+            "short_name": str(short_name).strip()[:80],
+            "semantic_version": str(semantic_version).strip()[:40],
+            "description": str(description).strip()[:1000],
+            "prompt_fragment": str(prompt_fragment).strip()[:4000],
+            "release_notes": str(release_notes).strip()[:1000],
+            "art_bible_version_id": str(art_bible_version_id).strip()[:120],
+            "visual_traits": visual_traits,
+            "character_design": character_design,
+            "palette": palette,
+            "applicable_topics": applicable_topics,
+            "avoid": avoid,
+            "risks": risks,
+            "positive_examples": positive_examples,
+            "negative_examples": negative_examples,
+            "settings": settings,
         }
-        topics = self._normalize_string_list(
-            applicable_topics or ["通用"], "applicable_topics"
-        )
+        issues = validate_style_pack(style_payload)
+        if issues:
+            raise WorkflowError(
+                "STYLE_PACK_SCHEMA_INVALID", issues[0]["message"], status=422
+            )
         now = utc_now()
         version_id = _new_id("stylev")
         with self.lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                art_bible = connection.execute(
+                    """
+                    SELECT id FROM art_bible_versions
+                    WHERE id = ? AND project_id = ? AND status = 'published'
+                    """,
+                    (style_payload["art_bible_version_id"], project_id),
+                ).fetchone()
+                if not art_bible:
+                    raise WorkflowError(
+                        "PUBLISHED_ART_BIBLE_REQUIRED",
+                        "风格版本必须绑定当前已发布的 Art Bible。",
+                        status=409,
+                    )
+                duplicate_semver = connection.execute(
+                    """
+                    SELECT id FROM style_pack_versions
+                    WHERE project_id = ? AND style_id = ? AND semantic_version = ?
+                    """,
+                    (
+                        project_id,
+                        style_payload["style_id"],
+                        style_payload["semantic_version"],
+                    ),
+                ).fetchone()
+                if duplicate_semver:
+                    raise WorkflowError(
+                        "STYLE_SEMVER_EXISTS", "该风格语义版本已存在。", status=409
+                    )
                 version = int(
                     connection.execute(
                         """
@@ -2896,7 +3558,7 @@ class SopStore:
                         FROM style_pack_versions
                         WHERE project_id = ? AND style_id = ?
                         """,
-                        (project_id, style_id),
+                        (project_id, style_payload["style_id"]),
                     ).fetchone()["version"]
                 )
                 connection.execute(
@@ -2905,23 +3567,38 @@ class SopStore:
                         id, project_id, style_id, version, name, short_name,
                         description, prompt_fragment, palette_json,
                         settings_json, applicable_topics_json, status,
-                        created_by, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                        created_by, created_at, semantic_version,
+                        schema_version, release_notes, art_bible_version_id,
+                        visual_traits_json, character_design_json, avoid_json,
+                        risks_json, positive_examples_json,
+                        negative_examples_json, benchmark_waived
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         version_id,
                         project_id,
-                        style_id,
+                        style_payload["style_id"],
                         version,
-                        name,
-                        str(short_name).strip()[:80],
-                        str(description).strip()[:1000],
-                        prompt_fragment,
-                        _json(palette_items),
-                        _json(safe_settings),
-                        _json(topics),
+                        style_payload["name"],
+                        style_payload["short_name"],
+                        style_payload["description"],
+                        style_payload["prompt_fragment"],
+                        _json(style_payload["palette"]),
+                        _json(style_payload["settings"]),
+                        _json(style_payload["applicable_topics"]),
                         actor_id,
                         now,
+                        style_payload["semantic_version"],
+                        STYLE_PACK_SCHEMA_VERSION,
+                        style_payload["release_notes"],
+                        style_payload["art_bible_version_id"],
+                        _json(style_payload["visual_traits"]),
+                        _json(style_payload["character_design"]),
+                        _json(style_payload["avoid"]),
+                        _json(style_payload["risks"]),
+                        _json(style_payload["positive_examples"]),
+                        _json(style_payload["negative_examples"]),
                     ),
                 )
                 result = self._style_pack_dict(
@@ -2969,24 +3646,30 @@ class SopStore:
                     raise WorkflowError(
                         "STYLE_VERSION_NOT_FOUND", "风格版本不存在。", status=404
                     )
-                if row["status"] == "published":
+                if row["status"] == "active":
                     connection.execute("COMMIT")
                     return self._style_pack_dict(row)
-                if row["status"] != "draft":
+                if row["status"] not in {"draft", "benchmarking"}:
                     raise WorkflowError(
-                        "INVALID_STYLE_STATE", "只有草稿风格可以发布。", status=409
+                        "INVALID_STYLE_STATE", "只有草稿或基准测试中的风格可以发布。", status=409
+                    )
+                gate = self._style_release_gate_locked(connection, row)
+                if not gate["passed"]:
+                    raise WorkflowError(
+                        gate["code"], gate["message"], status=409
                     )
                 connection.execute(
                     """
                     UPDATE style_pack_versions SET status = 'retired'
-                    WHERE project_id = ? AND style_id = ? AND status = 'published'
+                    WHERE project_id = ? AND style_id = ?
+                      AND status IN ('active', 'limited')
                     """,
                     (row["project_id"], row["style_id"]),
                 )
                 connection.execute(
                     """
                     UPDATE style_pack_versions
-                    SET status = 'published', published_at = ? WHERE id = ?
+                    SET status = 'active', published_at = ? WHERE id = ?
                     """,
                     (now, version_id),
                 )
@@ -3004,6 +3687,453 @@ class SopStore:
                     target_id=version_id,
                     before=self._style_pack_dict(row),
                     after=result,
+                )
+                connection.execute("COMMIT")
+                return result
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def style_benchmark_runs(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        *,
+        style_version_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self.project(project_id)
+        where = ["r.project_id = ?"]
+        params: list[Any] = [project_id]
+        if style_version_id:
+            where.append("r.style_version_id = ?")
+            params.append(str(style_version_id))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.*, b.status AS batch_status, b.task_count,
+                       b.actual_cost, sv.style_id, sv.name AS style_name,
+                       sv.semantic_version
+                FROM style_benchmark_runs r
+                JOIN style_pack_versions sv ON sv.id = r.style_version_id
+                LEFT JOIN generation_batches b ON b.id = r.batch_id
+                WHERE {' AND '.join(where)}
+                ORDER BY r.created_at DESC
+                LIMIT ?
+                """,
+                [*params, max(1, min(int(limit), 500))],
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = self._style_benchmark_run_dict(row)
+            effective = item["status"]
+            if effective in {"draft", "running"}:
+                if item.get("batch_status") == "completed":
+                    effective = "awaiting_evaluation"
+                elif item.get("batch_status") in {"partially_failed", "cancelled"}:
+                    effective = "failed"
+                elif item.get("batch_status") in {"queued", "running", "paused"}:
+                    effective = "running"
+            item["effective_status"] = effective
+            items.append(item)
+        return items
+
+    def create_style_benchmark_run(
+        self,
+        version_id: str,
+        poem_ids: Iterable[str],
+        *,
+        provider: str,
+        model: str,
+        unit_cost: float,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        actor_id, actor_role = self._actor(actor)
+        if actor_role not in {"art_director", "producer", "system_admin"}:
+            raise WorkflowError(
+                "STYLE_BENCHMARK_ROLE_REQUIRED",
+                "只有美术指导、制片人或系统管理员可以创建风格基准测试。",
+                status=403,
+            )
+        poem_ids = list(dict.fromkeys(str(item) for item in poem_ids))[:100]
+        with self._connect() as connection:
+            style_row = connection.execute(
+                "SELECT * FROM style_pack_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+            if not style_row:
+                raise WorkflowError(
+                    "STYLE_VERSION_NOT_FOUND", "风格版本不存在。", status=404
+                )
+            if style_row["status"] not in {"draft", "benchmarking"}:
+                raise WorkflowError(
+                    "INVALID_STYLE_STATE",
+                    "只有草稿或基准测试中的风格版本可以创建小样批次。",
+                    status=409,
+                )
+            art_row = connection.execute(
+                """
+                SELECT * FROM art_bible_versions
+                WHERE id = ? AND status = 'published'
+                """,
+                (style_row["art_bible_version_id"],),
+            ).fetchone()
+            if not art_row:
+                raise WorkflowError(
+                    "PUBLISHED_ART_BIBLE_REQUIRED",
+                    "风格绑定的 Art Bible 已非当前发布版，请创建新风格版本。",
+                    status=409,
+                )
+            policy = _decode(art_row["content_json"], {}).get(
+                "benchmark_policy", {}
+            )
+            minimum_poems = int(policy.get("min_poems_per_release") or 5)
+            if len(poem_ids) < minimum_poems:
+                raise WorkflowError(
+                    "BENCHMARK_POEM_COUNT_INSUFFICIENT",
+                    f"发布测试至少选择 {minimum_poems} 首基准诗。",
+                    status=409,
+                )
+            placeholders = ",".join("?" for _ in poem_ids)
+            registered = {
+                row["poem_id"]
+                for row in connection.execute(
+                    f"""
+                    SELECT poem_id FROM style_benchmark_poems
+                    WHERE project_id = ? AND is_active = 1
+                      AND poem_id IN ({placeholders})
+                    """,
+                    [style_row["project_id"], *poem_ids],
+                ).fetchall()
+            }
+            missing = [poem_id for poem_id in poem_ids if poem_id not in registered]
+            if missing:
+                raise WorkflowError(
+                    "BENCHMARK_POEM_NOT_REGISTERED",
+                    f"以下诗词不在 12 首基准集中：{', '.join(missing[:8])}",
+                    status=409,
+                )
+            active_run = connection.execute(
+                """
+                SELECT id FROM style_benchmark_runs
+                WHERE style_version_id = ? AND status IN ('draft', 'running')
+                LIMIT 1
+                """,
+                (version_id,),
+            ).fetchone()
+            if active_run:
+                raise WorkflowError(
+                    "STYLE_BENCHMARK_ALREADY_ACTIVE",
+                    "该风格版本已有未完成的基准测试。",
+                    status=409,
+                )
+            direction_rows = self._approved_direction_rows(
+                connection,
+                style_row["project_id"],
+                poem_ids,
+            )
+        direction_priority = {"narrative": 0, "atmospheric": 1, "symbolic": 2}
+        chosen: dict[str, sqlite3.Row] = {}
+        for row in sorted(
+            direction_rows,
+            key=lambda item: (
+                item["poem_id"],
+                direction_priority.get(item["direction_type"], 9),
+            ),
+        ):
+            chosen.setdefault(row["poem_id"], row)
+        direction_ids = [chosen[poem_id]["direction_id"] for poem_id in poem_ids]
+        run_id = _new_id("stylebench")
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO style_benchmark_runs(
+                        id, project_id, style_version_id,
+                        art_bible_version_id, status, poem_ids_json,
+                        policy_json, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        style_row["project_id"],
+                        version_id,
+                        style_row["art_bible_version_id"],
+                        _json(poem_ids),
+                        _json(policy),
+                        actor_id,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE style_pack_versions SET status = 'benchmarking'
+                    WHERE id = ?
+                    """,
+                    (version_id,),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        try:
+            batch = self.create_batch(
+                style_row["project_id"],
+                poem_ids,
+                direction_ids=direction_ids,
+                name=(
+                    f"风格基准 · {style_row['name']} "
+                    f"{style_row['semantic_version']} · {len(poem_ids)} 首"
+                ),
+                style_id=style_row["style_id"],
+                style_version_id=version_id,
+                allow_benchmarking_style=True,
+                purpose="style_benchmark",
+                benchmark_run_id=run_id,
+                aspect_ratio="portrait",
+                count_per_direction=int(policy.get("min_samples_per_poem") or 4),
+                provider=provider,
+                model=model,
+                unit_cost=unit_cost,
+                priority=40,
+                actor=actor,
+            )
+        except Exception as exc:
+            with self.lock, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    UPDATE style_benchmark_runs
+                    SET status='failed', notes=?, updated_at=?, completed_at=?
+                    WHERE id=?
+                    """,
+                    (str(exc)[:1000], utc_now(), utc_now(), run_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE style_pack_versions SET status='draft'
+                    WHERE id=? AND status='benchmarking'
+                    """,
+                    (version_id,),
+                )
+                connection.execute("COMMIT")
+            raise
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    UPDATE style_benchmark_runs
+                    SET batch_id = ?, updated_at = ? WHERE id = ?
+                    """,
+                    (batch["id"], utc_now(), run_id),
+                )
+                self._audit(
+                    connection,
+                    actor=actor,
+                    action="style_benchmark.created",
+                    target_type="style_benchmark_run",
+                    target_id=run_id,
+                    after={
+                        "style_version_id": version_id,
+                        "batch_id": batch["id"],
+                        "poem_ids": poem_ids,
+                        "task_count": batch["task_count"],
+                    },
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return {
+            "run": self.style_benchmark_runs(
+                style_row["project_id"], style_version_id=version_id, limit=1
+            )[0],
+            "batch": batch,
+        }
+
+    def start_style_benchmark(
+        self,
+        run_id: str,
+        *,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            run = connection.execute(
+                "SELECT * FROM style_benchmark_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if not run:
+            raise WorkflowError(
+                "STYLE_BENCHMARK_NOT_FOUND", "风格基准测试不存在。", status=404
+            )
+        if not run["batch_id"]:
+            raise WorkflowError(
+                "STYLE_BENCHMARK_BATCH_REQUIRED", "基准测试尚未创建生成批次。", status=409
+            )
+        batch = self.start_batch(run["batch_id"], actor=actor)
+        if batch["status"] != "budget_blocked":
+            now = utc_now()
+            with self.lock, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    UPDATE style_benchmark_runs
+                    SET status='running', updated_at=? WHERE id=?
+                    """,
+                    (now, run_id),
+                )
+                connection.execute("COMMIT")
+        return {
+            "run": self.style_benchmark_runs(
+                run["project_id"], style_version_id=run["style_version_id"], limit=1
+            )[0],
+            "batch": batch,
+        }
+
+    def evaluate_style_benchmark(
+        self,
+        run_id: str,
+        *,
+        style_match_score: float,
+        off_topic_rate: float,
+        favorite_rate: float,
+        notes: str = "",
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        actor_id, actor_role = self._actor(actor)
+        if actor_role not in {"art_director", "producer", "system_admin"}:
+            raise WorkflowError(
+                "STYLE_BENCHMARK_REVIEW_ROLE_REQUIRED",
+                "只有美术指导、制片人或系统管理员可以评估风格基准测试。",
+                status=403,
+            )
+        try:
+            style_match_score = round(float(style_match_score), 2)
+            off_topic_rate = round(float(off_topic_rate), 4)
+            favorite_rate = round(float(favorite_rate), 4)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowError(
+                "INVALID_BENCHMARK_METRICS", "基准指标格式无效。"
+            ) from exc
+        if not 0 <= style_match_score <= 100:
+            raise WorkflowError("INVALID_STYLE_MATCH_SCORE", "风格匹配分必须在 0–100。")
+        if not 0 <= off_topic_rate <= 1 or not 0 <= favorite_rate <= 1:
+            raise WorkflowError("INVALID_BENCHMARK_RATE", "比率必须在 0–1。")
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                run = connection.execute(
+                    """
+                    SELECT r.*, b.status AS batch_status, b.task_count,
+                           b.actual_cost
+                    FROM style_benchmark_runs r
+                    LEFT JOIN generation_batches b ON b.id = r.batch_id
+                    WHERE r.id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if not run:
+                    raise WorkflowError(
+                        "STYLE_BENCHMARK_NOT_FOUND", "风格基准测试不存在。", status=404
+                    )
+                if run["batch_status"] != "completed":
+                    raise WorkflowError(
+                        "STYLE_BENCHMARK_NOT_COMPLETE",
+                        "只有生成批次全部完成后才能录入评估。",
+                        status=409,
+                    )
+                policy = _decode(run["policy_json"], {})
+                poem_ids = _decode(run["poem_ids_json"], [])
+                sample_rows = connection.execute(
+                    """
+                    SELECT poem_id, COUNT(*) AS sample_count,
+                           SUM(CASE WHEN status IN ('qc_blocked', 'needs_manual_qc')
+                                    THEN 1 ELSE 0 END) AS qc_risk_count
+                    FROM production_images
+                    WHERE batch_id = ?
+                    GROUP BY poem_id
+                    """,
+                    (run["batch_id"],),
+                ).fetchall()
+                samples = {row["poem_id"]: int(row["sample_count"]) for row in sample_rows}
+                total_samples = sum(samples.values())
+                qc_risks = sum(int(row["qc_risk_count"] or 0) for row in sample_rows)
+                min_samples = int(policy.get("min_samples_per_poem") or 4)
+                min_poems = int(policy.get("min_poems_per_release") or 5)
+                checks = {
+                    "batch_completed": True,
+                    "poem_count": len(poem_ids) >= min_poems,
+                    "samples_per_poem": all(
+                        samples.get(poem_id, 0) >= min_samples for poem_id in poem_ids
+                    ),
+                    "style_match": style_match_score
+                    >= float(policy.get("min_style_match_score") or 75),
+                    "off_topic": off_topic_rate
+                    <= float(policy.get("max_off_topic_rate") or 0.2),
+                }
+                passed = all(checks.values())
+                metrics = {
+                    "poem_count": len(poem_ids),
+                    "sample_count": total_samples,
+                    "samples_by_poem": samples,
+                    "style_match_score": style_match_score,
+                    "off_topic_rate": off_topic_rate,
+                    "favorite_rate": favorite_rate,
+                    "qc_risk_rate": round(qc_risks / total_samples, 4)
+                    if total_samples
+                    else 1,
+                    "average_sample_cost": round(
+                        float(run["actual_cost"] or 0) / total_samples, 6
+                    )
+                    if total_samples
+                    else 0,
+                }
+                gate = {
+                    "passed": passed,
+                    "code": "STYLE_BENCHMARK_PASSED"
+                    if passed
+                    else "STYLE_BENCHMARK_FAILED",
+                    "message": "基准测试达到发布门槛。"
+                    if passed
+                    else "基准测试未达到发布门槛，请修订风格后重新测试。",
+                    "checks": checks,
+                }
+                connection.execute(
+                    """
+                    UPDATE style_benchmark_runs
+                    SET status=?, metrics_json=?, gate_json=?, notes=?,
+                        evaluated_by=?, updated_at=?, completed_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        "passed" if passed else "failed",
+                        _json(metrics),
+                        _json(gate),
+                        str(notes).strip()[:2000],
+                        actor_id,
+                        now,
+                        now,
+                        run_id,
+                    ),
+                )
+                result = self._style_benchmark_run_dict(
+                    connection.execute(
+                        "SELECT * FROM style_benchmark_runs WHERE id = ?",
+                        (run_id,),
+                    ).fetchone()
+                )
+                self._audit(
+                    connection,
+                    actor=actor,
+                    action="style_benchmark.evaluated",
+                    target_type="style_benchmark_run",
+                    target_id=run_id,
+                    before={"status": run["status"]},
+                    after={"status": result["status"], "metrics": metrics, "gate": gate},
                 )
                 connection.execute("COMMIT")
                 return result
@@ -3188,6 +4318,77 @@ class SopStore:
             )
         return rows
 
+    def _resolve_style_version(
+        self,
+        project_id: str,
+        style_id: str,
+        *,
+        style_version_id: str = "",
+        allow_benchmarking: bool = False,
+    ) -> dict[str, Any]:
+        if not style_version_id:
+            return self.published_style_pack(project_id, style_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM style_pack_versions
+                WHERE id = ? AND project_id = ? AND style_id = ?
+                """,
+                (style_version_id, project_id, style_id),
+            ).fetchone()
+        if not row:
+            raise WorkflowError(
+                "STYLE_VERSION_NOT_FOUND", "指定风格版本不存在。", status=404
+            )
+        allowed = {"active", "limited"}
+        if allow_benchmarking:
+            allowed.update({"draft", "benchmarking"})
+        if row["status"] not in allowed:
+            raise WorkflowError(
+                "STYLE_VERSION_NOT_RUNNABLE",
+                "该风格版本当前不能进入生成批次。",
+                status=409,
+            )
+        return self._style_pack_dict(row)
+
+    def _style_snapshot(self, style_version: dict[str, Any]) -> dict[str, Any]:
+        with self._connect() as connection:
+            art_row = connection.execute(
+                "SELECT * FROM art_bible_versions WHERE id = ?",
+                (style_version["art_bible_version_id"],),
+            ).fetchone()
+        if not art_row:
+            raise WorkflowError(
+                "ART_BIBLE_VERSION_NOT_FOUND",
+                "风格版本绑定的 Art Bible 不存在。",
+                status=409,
+            )
+        art_bible = self._art_bible_dict(art_row)
+        return {
+            "id": style_version["style_id"],
+            "version_id": style_version["id"],
+            "version": style_version["version"],
+            "semantic_version": style_version["semantic_version"],
+            "schema_version": style_version["schema_version"],
+            "name": style_version["name"],
+            "short_name": style_version["short_name"],
+            "description": style_version["description"],
+            "prompt_fragment": style_version["prompt_fragment"],
+            "palette": style_version["palette"],
+            "visual_traits": style_version["visual_traits"],
+            "character_design": style_version["character_design"],
+            "avoid": style_version["avoid"],
+            "risks": style_version["risks"],
+            "art_bible": {
+                "id": art_bible["id"],
+                "version": art_bible["version"],
+                "semantic_version": art_bible["semantic_version"],
+                "schema_version": art_bible["schema_version"],
+                "content": art_bible["content"],
+            },
+            **style_version["settings"],
+        }
+
     def estimate_batch(
         self,
         project_id: str,
@@ -3200,6 +4401,8 @@ class SopStore:
         provider: str,
         model: str,
         unit_cost: float,
+        style_version_id: str = "",
+        allow_benchmarking_style: bool = False,
     ) -> dict[str, Any]:
         self.project(project_id)
         style_id = str(style_id).strip()[:80]
@@ -3218,7 +4421,12 @@ class SopStore:
             raise WorkflowError("INVALID_COUNT", "每个方向可生成 1–4 张。")
         if unit_cost < 0 or unit_cost > 1000:
             raise WorkflowError("INVALID_UNIT_COST", "单张预估成本无效。")
-        style_version = self.published_style_pack(project_id, style_id)
+        style_version = self._resolve_style_version(
+            project_id,
+            style_id,
+            style_version_id=style_version_id,
+            allow_benchmarking=allow_benchmarking_style,
+        )
         with self._connect() as connection:
             rows = self._approved_direction_rows(
                 connection, project_id, poem_ids, direction_ids
@@ -3272,6 +4480,10 @@ class SopStore:
         model: str,
         unit_cost: float,
         priority: int = 50,
+        style_version_id: str = "",
+        allow_benchmarking_style: bool = False,
+        purpose: str = "production",
+        benchmark_run_id: str = "",
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         estimate = self.estimate_batch(
@@ -3284,6 +4496,8 @@ class SopStore:
             provider=provider,
             model=model,
             unit_cost=unit_cost,
+            style_version_id=style_version_id,
+            allow_benchmarking_style=allow_benchmarking_style,
         )
         try:
             priority = max(1, min(int(priority), 100))
@@ -3295,18 +4509,13 @@ class SopStore:
         batch_name = str(name).strip()[:100] or (
             f"{len(estimate['poem_ids'])} 首诗 · {estimate['task_count']} 张生产批次"
         )
-        style_version = self.published_style_pack(project_id, style_id)
-        style_snapshot = {
-            "id": style_id,
-            "version_id": style_version["id"],
-            "version": style_version["version"],
-            "name": style_version["name"],
-            "short_name": style_version["short_name"],
-            "description": style_version["description"],
-            "prompt_fragment": style_version["prompt_fragment"],
-            "palette": style_version["palette"],
-            **style_version["settings"],
-        }
+        style_version = self._resolve_style_version(
+            project_id,
+            style_id,
+            style_version_id=estimate["style_version_id"],
+            allow_benchmarking=allow_benchmarking_style,
+        )
+        style_snapshot = self._style_snapshot(style_version)
         with self.lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -3324,9 +4533,9 @@ class SopStore:
                         priority, status,
                         task_count, estimated_cost, actual_cost, currency,
                         budget_snapshot_json, settings_json, created_by,
-                        created_at, updated_at
+                        created_at, updated_at, purpose, benchmark_run_id
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, 0, ?,
-                              ?, ?, ?, ?, ?)
+                              ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         batch_id,
@@ -3350,11 +4559,15 @@ class SopStore:
                                 "poem_ids": estimate["poem_ids"],
                                 "style_version_id": estimate["style_version_id"],
                                 "style_version": estimate["style_version"],
+                                "purpose": str(purpose).strip()[:40] or "production",
+                                "benchmark_run_id": str(benchmark_run_id).strip()[:120],
                             }
                         ),
                         actor_id,
                         now,
                         now,
+                        str(purpose).strip()[:40] or "production",
+                        str(benchmark_run_id).strip()[:120],
                     ),
                 )
                 for row in rows:
@@ -3367,7 +4580,7 @@ class SopStore:
                     for sample_index in range(1, estimate["count_per_direction"] + 1):
                         idempotency_key = hashlib.sha256(
                             (
-                                f"{batch_id}|{row['direction_id']}|{style_id}|"
+                                f"{batch_id}|{row['direction_id']}|{style_version['id']}|"
                                 f"{aspect_ratio}|{sample_index}"
                             ).encode("utf-8")
                         ).hexdigest()
@@ -3911,9 +5124,11 @@ class SopStore:
                 row["id"]
                 for row in connection.execute(
                     f"""
-                    SELECT id FROM production_images
-                    WHERE project_id = ? AND status IN ({placeholders})
-                    ORDER BY poem_id, created_at DESC
+                    SELECT i.id FROM production_images i
+                    JOIN generation_batches b ON b.id = i.batch_id
+                    WHERE i.project_id = ? AND i.status IN ({placeholders})
+                      AND b.purpose != 'style_benchmark'
+                    ORDER BY i.poem_id, i.created_at DESC
                     LIMIT 1000
                     """,
                     [project_id, *statuses],
@@ -3955,6 +5170,22 @@ class SopStore:
             },
         }
 
+    @staticmethod
+    def _assert_deliverable_image_locked(
+        connection: sqlite3.Connection,
+        image: sqlite3.Row,
+    ) -> None:
+        batch = connection.execute(
+            "SELECT purpose FROM generation_batches WHERE id = ?",
+            (image["batch_id"],),
+        ).fetchone()
+        if batch and batch["purpose"] == "style_benchmark":
+            raise WorkflowError(
+                "STYLE_BENCHMARK_IMAGE_ISOLATED",
+                "风格基准图只用于 Style Lab 评估，不能进入正式审片、返工或交付链路。",
+                status=409,
+            )
+
     def decide_image(
         self,
         image_id: str,
@@ -3981,6 +5212,7 @@ class SopStore:
                 ).fetchone()
                 if not image:
                     raise WorkflowError("IMAGE_NOT_FOUND", "生产候选不存在。", status=404)
+                self._assert_deliverable_image_locked(connection, image)
                 if image["status"] in {"qc_blocked", "needs_manual_qc"}:
                     raise WorkflowError(
                         "QC_OVERRIDE_REQUIRED",
@@ -4117,6 +5349,7 @@ class SopStore:
                 ).fetchone()
                 if not image:
                     raise WorkflowError("IMAGE_NOT_FOUND", "生产候选不存在。", status=404)
+                self._assert_deliverable_image_locked(connection, image)
                 connection.execute(
                     """
                     INSERT INTO rework_orders(
@@ -4406,6 +5639,7 @@ class SopStore:
                 ).fetchone()
                 if not image:
                     raise WorkflowError("IMAGE_NOT_FOUND", "生产候选不存在。", status=404)
+                self._assert_deliverable_image_locked(connection, image)
                 if image["status"] not in {"final_candidate", "finalized"}:
                     raise WorkflowError(
                         "FINAL_CANDIDATE_REQUIRED",
@@ -4706,7 +5940,10 @@ class SopStore:
             """
             SELECT a.*, p.title, p.author, p.dynasty, p.lines_json,
                    i.style_id, i.style_version_id,
-                   sv.version AS style_version, sv.name AS style_name,
+                   sv.version AS style_version,
+                   sv.semantic_version AS style_semantic_version,
+                   sv.name AS style_name,
+                   sv.art_bible_version_id,
                    i.provider, i.model, i.prompt, i.prompt_hash,
                    i.prompt_template_version, i.prompt_segments_json,
                    i.generation,
@@ -4771,7 +6008,9 @@ class SopStore:
                     "id": row["style_id"],
                     "version_id": row["style_version_id"],
                     "version": row["style_version"],
+                    "semantic_version": row["style_semantic_version"],
                     "name": row["style_name"],
+                    "art_bible_version_id": row["art_bible_version_id"],
                 },
                 "style_id": row["style_id"],
                 "provider": row["provider"],
@@ -5185,19 +6424,20 @@ class SopStore:
                     """,
                     (_json(available), now, now, batch_id),
                 )
-                connection.execute(
-                    """
-                    UPDATE poems
-                    SET status = 'generating', blocked_reason = '', updated_at = ?
-                    WHERE id IN (
-                        SELECT DISTINCT poem_id
-                        FROM generation_tasks
-                        WHERE batch_id = ?
-                          AND status IN ('ready', 'retry_waiting')
+                if batch_row["purpose"] != "style_benchmark":
+                    connection.execute(
+                        """
+                        UPDATE poems
+                        SET status = 'generating', blocked_reason = '', updated_at = ?
+                        WHERE id IN (
+                            SELECT DISTINCT poem_id
+                            FROM generation_tasks
+                            WHERE batch_id = ?
+                              AND status IN ('ready', 'retry_waiting')
+                        )
+                        """,
+                        (now, batch_id),
                     )
-                    """,
-                    (now, batch_id),
-                )
                 connection.execute(
                     """
                     UPDATE rework_orders SET status = 'running', updated_at = ?
@@ -5522,18 +6762,19 @@ class SopStore:
                     """,
                     (now, batch_id),
                 )
-                connection.execute(
-                    """
-                    UPDATE poems
-                    SET status = 'generating', blocked_reason = '', updated_at = ?
-                    WHERE id IN (
-                        SELECT DISTINCT poem_id
-                        FROM generation_tasks
-                        WHERE batch_id = ? AND status = 'ready'
+                if batch["purpose"] != "style_benchmark":
+                    connection.execute(
+                        """
+                        UPDATE poems
+                        SET status = 'generating', blocked_reason = '', updated_at = ?
+                        WHERE id IN (
+                            SELECT DISTINCT poem_id
+                            FROM generation_tasks
+                            WHERE batch_id = ? AND status = 'ready'
+                        )
+                        """,
+                        (now, batch_id),
                     )
-                    """,
-                    (now, batch_id),
-                )
                 self._audit(
                     connection,
                     actor=actor,
@@ -5969,6 +7210,12 @@ class SopStore:
         batch_id: str,
         now: str,
     ) -> None:
+        batch = connection.execute(
+            "SELECT purpose FROM generation_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch and batch["purpose"] == "style_benchmark":
+            return
         poem_ids = [
             row["poem_id"]
             for row in connection.execute(
@@ -6094,7 +7341,15 @@ class SopStore:
             },
             "instruction": self.instruction(project_id),
             "instruction_versions": self.instructions(project_id),
+            "art_bible": self.published_art_bible(project_id),
+            "art_bible_versions": self.art_bible_versions(project_id),
             "style_packs": self.style_pack_versions(project_id),
+            "style_benchmark_poems": self.benchmark_poems(project_id),
+            "style_benchmark_runs": self.style_benchmark_runs(project_id),
+            "style_contracts": {
+                "art_bible_schema_version": ART_BIBLE_SCHEMA_VERSION,
+                "style_pack_schema_version": STYLE_PACK_SCHEMA_VERSION,
+            },
             "batches": self.batches(project_id),
             "tasks": self.tasks(project_id=project_id, limit=300),
             "task_page": task_page,
@@ -6108,7 +7363,9 @@ class SopStore:
                 "requirement_statuses": sorted(REQUIREMENT_STATUSES),
                 "direction_statuses": sorted(DIRECTION_STATUSES),
                 "instruction_statuses": sorted(INSTRUCTION_STATUSES),
+                "art_bible_statuses": sorted(ART_BIBLE_STATUSES),
                 "style_pack_statuses": sorted(STYLE_PACK_STATUSES),
+                "style_benchmark_statuses": sorted(STYLE_BENCHMARK_STATUSES),
                 "batch_statuses": sorted(BATCH_STATUSES),
                 "task_statuses": sorted(TASK_STATUSES),
                 "production_image_statuses": sorted(PRODUCTION_IMAGE_STATUSES),

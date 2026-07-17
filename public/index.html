@@ -392,6 +392,7 @@
                 <p>管理风格版本、图像引擎、预算规则和历史知识约束。</p>
               </div>
               <div class="page-actions">
+                <button class="secondary-button" id="open-art-bible-button" data-role-allow="art_director,producer,system_admin" type="button">新建 Art Bible</button>
                 <button class="primary-button" id="open-style-button" data-role-allow="art_director,producer,system_admin" type="button">新建风格版本</button>
               </div>
             </div>
@@ -435,13 +436,16 @@
           <button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button>
         </header>
         <div class="dialog-body form-stack">
-          <div class="import-guidance"><strong>同一风格 ID 创建递增版本</strong><p>发布后成为新批次默认版本，历史批次继续使用自己的冻结快照。</p></div>
+          <div class="import-guidance"><strong>先绑定 Art Bible，再跑基准测试</strong><p>新版本必须用至少 5 首基准诗、每首 4 张小样完成评估，达到门槛后才能发布。</p></div>
           <div class="form-grid two-columns">
             <label><span>风格 ID</span><input class="dialog-input" name="style_id" pattern="[a-z0-9][a-z0-9-]{1,79}" placeholder="ink-whitespace" required /></label>
             <label><span>短名称</span><input class="dialog-input" name="short_name" maxlength="80" /></label>
+            <label><span>语义版本</span><input class="dialog-input" name="semantic_version" pattern="(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)" placeholder="1.1.0" required /></label>
+            <label><span>绑定 Art Bible</span><select class="dialog-select" name="art_bible_version_id" required></select></label>
           </div>
           <label><span>版本名称</span><input class="dialog-input" name="name" maxlength="120" required /></label>
-          <label><span>描述</span><textarea class="dialog-textarea" name="description" rows="3"></textarea></label>
+          <label><span>描述</span><textarea class="dialog-textarea" name="description" rows="3" required></textarea></label>
+          <label><span>发布说明</span><textarea class="dialog-textarea" name="release_notes" rows="3" required></textarea></label>
           <label><span>Prompt 片段</span><textarea class="dialog-textarea" name="prompt_fragment" rows="5" required></textarea></label>
           <label><span>适用题材（逗号分隔）</span><input class="dialog-input" name="applicable_topics" placeholder="山水, 羁旅, 思乡" /></label>
           <label><span>色板（逗号分隔 HEX）</span><input class="dialog-input" name="palette" placeholder="#EEEAE0, #303634" /></label>
@@ -451,8 +455,88 @@
             <label><span>强调色</span><input class="dialog-input" name="accent" placeholder="#767B78" /></label>
             <label><span>纸张类型</span><input class="dialog-input" name="paper" placeholder="cool" /></label>
           </div>
+          <div class="form-grid two-columns">
+            <label><span>线条</span><input class="dialog-input" name="trait_line" required /></label>
+            <label><span>材质</span><input class="dialog-input" name="trait_texture" required /></label>
+            <label><span>光线</span><input class="dialog-input" name="trait_lighting" required /></label>
+            <label><span>对比度</span><input class="dialog-input" name="trait_contrast" required /></label>
+            <label><span>饱和度</span><input class="dialog-input" name="trait_saturation" required /></label>
+            <label><span>留白策略</span><input class="dialog-input" name="trait_whitespace" required /></label>
+            <label><span>人物比例</span><input class="dialog-input" name="character_proportion" required /></label>
+            <label><span>人物表情</span><input class="dialog-input" name="character_expression" required /></label>
+          </div>
+          <label><span>人物服饰规范</span><input class="dialog-input" name="character_costume" required /></label>
+          <div class="form-grid two-columns">
+            <label><span>禁止项（每行一条）</span><textarea class="dialog-textarea" name="avoid" rows="4" required></textarea></label>
+            <label><span>已知风险（每行一条）</span><textarea class="dialog-textarea" name="risks" rows="4" required></textarea></label>
+            <label><span>正例标准（每行一条）</span><textarea class="dialog-textarea" name="positive_examples" rows="4" required></textarea></label>
+            <label><span>反例标准（每行一条）</span><textarea class="dialog-textarea" name="negative_examples" rows="4" required></textarea></label>
+          </div>
         </div>
         <footer><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存草稿</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="art-bible-dialog">
+      <form class="dialog-shell" id="art-bible-form">
+        <header><div><p class="eyebrow">GLOBAL ART CONTRACT</p><h2>新建 Art Bible 版本</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></header>
+        <div class="dialog-body form-stack">
+          <div class="import-guidance"><strong>发布后只影响后续新建风格版本</strong><p>已存在的风格和生产批次继续绑定原 Art Bible，避免规则静默漂移。</p></div>
+          <div class="form-grid two-columns">
+            <label><span>版本名称</span><input class="dialog-input" name="name" required /></label>
+            <label><span>语义版本</span><input class="dialog-input" name="semantic_version" placeholder="1.1.0" required /></label>
+          </div>
+          <label><span>发布说明</span><textarea class="dialog-textarea" name="release_notes" rows="3" required></textarea></label>
+          <label><span>色彩规则（每行一条）</span><textarea class="dialog-textarea" name="palette_rules" rows="3" required></textarea></label>
+          <label><span>线条规则（每行一条）</span><textarea class="dialog-textarea" name="line_rules" rows="3" required></textarea></label>
+          <label><span>人物比例规则（每行一条）</span><textarea class="dialog-textarea" name="character_proportion_rules" rows="3" required></textarea></label>
+          <label><span>空间规则（每行一条）</span><textarea class="dialog-textarea" name="spatial_rules" rows="3" required></textarea></label>
+          <label><span>材质规则（每行一条）</span><textarea class="dialog-textarea" name="material_rules" rows="3" required></textarea></label>
+          <label><span>文字禁令（每行一条）</span><textarea class="dialog-textarea" name="text_prohibitions" rows="3" required></textarea></label>
+          <label><span>历史边界（每行一条）</span><textarea class="dialog-textarea" name="historical_boundaries" rows="3" required></textarea></label>
+          <div class="form-grid two-columns">
+            <label><span>基准池诗数</span><input class="dialog-input" name="benchmark_poem_count" type="number" min="12" max="100" value="12" required /></label>
+            <label><span>每版最少诗数</span><input class="dialog-input" name="min_poems_per_release" type="number" min="5" value="5" required /></label>
+            <label><span>每诗最少小样</span><input class="dialog-input" name="min_samples_per_poem" type="number" min="4" max="9" value="4" required /></label>
+            <label><span>最低风格匹配分</span><input class="dialog-input" name="min_style_match_score" type="number" min="0" max="100" value="75" required /></label>
+            <label><span>最高偏题率</span><input class="dialog-input" name="max_off_topic_rate" type="number" min="0" max="1" step="0.01" value="0.2" required /></label>
+          </div>
+        </div>
+        <footer><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存草稿</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="style-benchmark-dialog">
+      <form class="dialog-shell" id="style-benchmark-form">
+        <header><div><p class="eyebrow">STYLE BENCHMARK</p><h2 id="style-benchmark-title">创建风格基准测试</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></header>
+        <input type="hidden" name="style_version_id" />
+        <div class="dialog-body form-stack">
+          <div class="import-guidance"><strong>至少选择 5 首已准备诗词</strong><p>每首自动选择一个已批准方向并生成 4 张小样；基准图片与正式审片队列隔离。</p></div>
+          <div class="benchmark-poem-picker" id="benchmark-poem-picker"></div>
+          <div class="form-grid two-columns">
+            <label><span>Provider</span><input class="dialog-input" name="provider" readonly /></label>
+            <label><span>模型</span><input class="dialog-input" name="model" readonly /></label>
+            <label><span>单张预估成本</span><input class="dialog-input" name="unit_cost" type="number" min="0" step="0.001" value="0" required /></label>
+          </div>
+        </div>
+        <footer><span id="benchmark-selection-note">请选择基准诗。</span><div><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">创建并启动 4 宫格</button></div></footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="style-evaluation-dialog">
+      <form class="dialog-shell" id="style-evaluation-form">
+        <header><div><p class="eyebrow">ART DIRECTOR EVALUATION</p><h2>录入风格基准结论</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button></header>
+        <input type="hidden" name="run_id" />
+        <div class="dialog-body form-stack">
+          <div class="import-guidance" id="style-evaluation-context"></div>
+          <div class="form-grid two-columns">
+            <label><span>风格匹配分（0–100）</span><input class="dialog-input" name="style_match_score" type="number" min="0" max="100" required /></label>
+            <label><span>偏题率（%）</span><input class="dialog-input" name="off_topic_percent" type="number" min="0" max="100" step="0.1" required /></label>
+            <label><span>收藏率（%）</span><input class="dialog-input" name="favorite_percent" type="number" min="0" max="100" step="0.1" required /></label>
+          </div>
+          <label><span>评估备注</span><textarea class="dialog-textarea" name="notes" rows="4"></textarea></label>
+        </div>
+        <footer><span>系统会同时核验诗数、小样数、批次状态和 Art Bible 阈值。</span><div><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">提交评估</button></div></footer>
       </form>
     </dialog>
 

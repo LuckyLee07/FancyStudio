@@ -1,0 +1,74 @@
+[
+  {
+    "poem_id": "jing-ye-si",
+    "categories": ["思乡", "儿童熟知", "人物叙事"],
+    "misread_risks": ["床不是现代床具", "疑霜是月光感受而非真实积霜"],
+    "historical_risks": ["旅舍陈设和服饰需符合唐代语境"]
+  },
+  {
+    "poem_id": "jiang-xue",
+    "categories": ["山水", "儿童熟知", "无人物主导"],
+    "misread_risks": ["人物应极小，不能把孤寂画成英雄肖像"],
+    "historical_risks": ["蓑笠、木舟和钓具避免现代化"]
+  },
+  {
+    "poem_id": "lu-zhai",
+    "categories": ["山水", "田园", "无人物主导"],
+    "misread_risks": ["诗中只闻人声，不应无依据画出正面人物"],
+    "historical_risks": ["避免现代景区设施和人工灯光"]
+  },
+  {
+    "poem_id": "feng-qiao-ye-bo",
+    "categories": ["思乡", "羁旅", "夜景"],
+    "misread_risks": ["月已将落，不应使用巨大满月", "钟声是空间线索而非可见实体"],
+    "historical_risks": ["客船、寺院与渔火需符合时代语境"]
+  },
+  {
+    "poem_id": "chun-xiao",
+    "categories": ["田园", "儿童熟知", "人物叙事"],
+    "misread_risks": ["落花表达惜春，不应套用樱花符号"],
+    "historical_risks": ["室内、窗式与庭院不得现代化"]
+  },
+  {
+    "poem_id": "deng-guan-que-lou",
+    "categories": ["山水", "儿童熟知", "建筑"],
+    "misread_risks": ["黄河入海是宏观视野，不必写实同框海岸"],
+    "historical_risks": ["鹳雀楼形制有不确定性，避免当代复建细节过实"]
+  },
+  {
+    "poem_id": "song-meng-hao-ran",
+    "categories": ["送别", "山水", "人物叙事"],
+    "misread_risks": ["黄鹤不是画面主体", "孤帆远去才是叙事核心"],
+    "historical_risks": ["楼阁、帆船与春日服饰需符合唐代语境"]
+  },
+  {
+    "poem_id": "liang-zhou-ci",
+    "categories": ["边塞", "人物叙事", "器物"],
+    "misread_risks": ["豪饮背后含战争苍凉，不应画成纯庆典"],
+    "historical_risks": ["夜光杯、琵琶、军帐和战马装备需复核"]
+  },
+  {
+    "poem_id": "shan-ju-qiu-ming",
+    "categories": ["山水", "田园", "人物叙事"],
+    "misread_risks": ["浣女和渔舟是远处生活线索，不应喧宾夺主"],
+    "historical_risks": ["渔舟、衣着与生活器具需符合唐代语境"]
+  },
+  {
+    "poem_id": "zhong-nan-wang-yu-xue",
+    "categories": ["山水", "雪景", "无人物主导"],
+    "misread_risks": ["视点是城中远望，不应画成置身雪山"],
+    "historical_risks": ["远城轮廓不得出现现代天际线"]
+  },
+  {
+    "poem_id": "min-nong-qi-er",
+    "categories": ["田园", "儿童熟知", "人物叙事"],
+    "misread_risks": ["重点是劳作与珍惜粮食，不应田园浪漫化"],
+    "historical_risks": ["农具、衣着和作物形态需符合唐代农业语境"]
+  },
+  {
+    "poem_id": "gong-ci-xue-feng",
+    "categories": ["宫廷", "人物叙事", "建筑"],
+    "misread_risks": ["宫怨来自等待与时间感，不应画成盛大宴会"],
+    "historical_risks": ["宫装、发式、铜漏、殿宇与内侍服饰需重点复核"]
+  }
+]

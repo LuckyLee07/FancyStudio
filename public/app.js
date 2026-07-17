@@ -18,7 +18,12 @@ const state = {
     direction_schema: null,
     instruction: null,
     instruction_versions: [],
+    art_bible: null,
+    art_bible_versions: [],
     style_packs: [],
+    style_benchmark_poems: [],
+    style_benchmark_runs: [],
+    style_contracts: null,
     provider_status: null,
     production_report: { daily: [], anomalies: [], tasks: {} },
     batches: [],
@@ -336,7 +341,9 @@ function productionImageById(imageId) {
 }
 
 function publishedStylePacks() {
-  return (state.sop.style_packs || []).filter((style) => style.status === "published");
+  return (state.sop.style_packs || []).filter((style) =>
+    ["active", "limited"].includes(style.status),
+  );
 }
 
 function statusBadge(status, map = statusMeta) {
@@ -1521,8 +1528,44 @@ function renderAssets() {
     : '<div class="empty-state compact"><strong>暂无导出记录</strong><p>导出后会保留包名、数量、校验和与 Manifest 地址。</p></div>';
 }
 
+function styleBenchmarkAction(style) {
+  const run = style.latest_benchmark;
+  const status = run?.effective_status || run?.status || "";
+  if (style.status === "draft" || (style.status === "benchmarking" && status === "failed")) {
+    return `<button class="secondary-button" type="button" data-role-allow="art_director,producer,system_admin" data-start-style-benchmark="${escapeHtml(
+      style.id,
+    )}">${status === "failed" ? "重新跑基准测试" : "创建 5 首基准测试"}</button>`;
+  }
+  if (style.status === "benchmarking" && status === "awaiting_evaluation") {
+    return `<button class="secondary-button" type="button" data-role-allow="art_director,producer,system_admin" data-evaluate-style-benchmark="${escapeHtml(
+      run.id,
+    )}">录入基准评估</button>`;
+  }
+  if (style.status === "benchmarking" && status === "passed") {
+    return `<button class="primary-button" type="button" data-role-allow="art_director,producer,system_admin" data-publish-style="${escapeHtml(
+      style.id,
+    )}">发布此版本</button>`;
+  }
+  if (style.status === "benchmarking") {
+    return `<button class="secondary-button" type="button" disabled>基准生成中 · ${escapeHtml(
+      run?.batch_status || "待启动",
+    )}</button>`;
+  }
+  return "";
+}
+
 function renderResources() {
   const styles = state.sop.style_packs || [];
+  const artBible = state.sop.art_bible || {};
+  const artBibleVersions = state.sop.art_bible_versions || [];
+  const benchmarkPoems = state.sop.style_benchmark_poems || [];
+  const readyBenchmarkCount = benchmarkPoems.filter(
+    (item) =>
+      item.poem_status === "ready_for_production" &&
+      directionsForPoem(item.poem_id).some(
+        (direction) => direction.is_current && direction.status === "approved",
+      ),
+  ).length;
   const provider = state.sop.provider_status || state.legacy.config.provider_status || {};
   const budget = state.sop.budget || {};
   const hardLimit = Number(budget.hard_limit || 0);
@@ -1608,8 +1651,58 @@ function renderResources() {
           : "<span>尚无备份。完成首个生产批次后建议立即创建。</span>"}
       </div>
     </article>
+    <article class="resource-panel art-bible-panel">
+      <span class="resource-label">GLOBAL ART BIBLE</span>
+      <div class="art-bible-title"><div><h3>${escapeHtml(
+        artBible.name || "尚未发布 Art Bible",
+      )}</h3><small>${escapeHtml(artBible.semantic_version || "—")} · ${escapeHtml(
+        artBible.schema_version || "—",
+      )}</small></div>${statusBadge(artBible.status || "missing", {
+        published: ["已发布", "success"],
+        missing: ["缺失", "danger"],
+      })}</div>
+      <p>${escapeHtml(artBible.release_notes || "风格版本必须绑定已发布的全局美术规范。")}</p>
+      <div class="art-bible-rule-grid">
+        <span><small>色彩</small><strong>${artBible.content?.palette_rules?.length || 0}</strong></span>
+        <span><small>空间</small><strong>${artBible.content?.spatial_rules?.length || 0}</strong></span>
+        <span><small>文字禁令</small><strong>${artBible.content?.text_prohibitions?.length || 0}</strong></span>
+        <span><small>历史边界</small><strong>${artBible.content?.historical_boundaries?.length || 0}</strong></span>
+      </div>
+      <div class="art-bible-versions">
+        ${artBibleVersions
+          .map(
+            (version) => `<div><span>${escapeHtml(version.semantic_version)} · ${escapeHtml(
+              version.status,
+            )}</span>${version.status === "draft"
+                ? `<button class="secondary-button" type="button" data-role-allow="art_director,producer,system_admin" data-publish-art-bible="${escapeHtml(
+                    version.id,
+                  )}">发布</button>`
+                : ""}</div>`,
+          )
+          .join("")}
+      </div>
+    </article>
+    <article class="resource-panel benchmark-pool-panel">
+      <span class="resource-label">BENCHMARK POEM SET</span>
+      <div class="benchmark-pool-title"><h3>12 首美术验证集</h3><strong>${readyBenchmarkCount} / ${benchmarkPoems.length} 已准备</strong></div>
+      <p>覆盖山水、思乡、送别、边塞、田园、宫廷、儿童熟知和人物叙事；每首记录误读点与历史风险。</p>
+      <div class="benchmark-topic-cloud">${benchmarkPoems
+        .flatMap((item) => item.categories || [])
+        .filter((item, index, array) => array.indexOf(item) === index)
+        .map((item) => `<span>${escapeHtml(item)}</span>`)
+        .join("")}</div>
+      <small>新风格发布门槛：至少 ${Number(
+        artBible.content?.benchmark_policy?.min_poems_per_release || 5,
+      )} 首，每首 ${Number(
+        artBible.content?.benchmark_policy?.min_samples_per_poem || 4,
+      )} 张，风格匹配 ≥ ${Number(
+        artBible.content?.benchmark_policy?.min_style_match_score || 75,
+      )}，偏题率 ≤ ${Math.round(
+        Number(artBible.content?.benchmark_policy?.max_off_topic_rate || 0.2) * 100,
+      )}%。</small>
+    </article>
     <section class="style-resource-section">
-      <div class="resource-section-head"><div><span class="resource-label">STYLE PACKS</span><h3>首批风格基线</h3></div><strong>${styles.length} 个版本</strong></div>
+      <div class="resource-section-head"><div><span class="resource-label">STYLE LAB</span><h3>风格版本与发布门禁</h3></div><strong>${styles.length} 个版本</strong></div>
       <div class="style-resource-grid">
         ${styles
           .map(
@@ -1622,9 +1715,11 @@ function renderResources() {
                 </div>
                 <div class="style-card-status"><span>${escapeHtml(
                   style.status.toUpperCase(),
-                )} · v${style.version}</span>${statusBadge(style.status, {
+                )} · ${escapeHtml(style.semantic_version || `v${style.version}`)}</span>${statusBadge(style.status, {
                   draft: ["草稿", "warning"],
-                  published: ["已发布", "success"],
+                  benchmarking: ["基准测试", "warning"],
+                  active: ["生产中", "success"],
+                  limited: ["限量", "warning"],
                   retired: ["已退役", "neutral"],
                 })}</div>
                 <h4>${escapeHtml(style.name)}</h4>
@@ -1633,11 +1728,22 @@ function renderResources() {
                   style.settings?.paper || "unspecified",
                 )} paper</small>
                 <small>适用：${escapeHtml((style.applicable_topics || []).join("、") || "未设置")}</small>
+                <small>Art Bible：${escapeHtml(style.art_bible_version_id || "未绑定")}</small>
+                <div class="style-contract-summary"><span>正例 ${(style.positive_examples || []).length}</span><span>反例 ${(style.negative_examples || []).length}</span><span>风险 ${(style.risks || []).length}</span></div>
                 ${
-                  style.status === "draft"
-                    ? `<button class="secondary-button" type="button" data-role-allow="art_director,producer,system_admin" data-publish-style="${style.id}">发布此版本</button>`
-                    : ""
+                  style.latest_benchmark?.metrics?.sample_count
+                    ? `<div class="style-metrics"><span><small>匹配</small><strong>${Number(
+                        style.latest_benchmark.metrics.style_match_score || 0,
+                      )}</strong></span><span><small>偏题</small><strong>${Math.round(
+                        Number(style.latest_benchmark.metrics.off_topic_rate || 0) * 100,
+                      )}%</strong></span><span><small>成本/张</small><strong>${Number(
+                        style.latest_benchmark.metrics.average_sample_cost || 0,
+                      ).toFixed(3)}</strong></span></div>`
+                    : `<div class="style-gate-note ${style.release_gate?.passed ? "is-pass" : ""}">${escapeHtml(
+                        style.release_gate?.message || "尚无基准测试",
+                      )}</div>`
                 }
+                ${styleBenchmarkAction(style)}
               </article>`,
           )
           .join("")}
@@ -1875,7 +1981,17 @@ async function publishInstructionVersion(instructionId) {
 }
 
 function openStyleDialog() {
-  document.querySelector("#style-form").reset();
+  const form = document.querySelector("#style-form");
+  form.reset();
+  form.elements.art_bible_version_id.innerHTML = (state.sop.art_bible_versions || [])
+    .filter((item) => item.status === "published")
+    .map(
+      (item) =>
+        `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(
+          item.semantic_version,
+        )}</option>`,
+    )
+    .join("");
   document.querySelector("#style-dialog").showModal();
 }
 
@@ -1900,6 +2016,9 @@ async function saveStyleVersion(event) {
         style_id: data.get("style_id"),
         name: data.get("name"),
         short_name: data.get("short_name"),
+        semantic_version: data.get("semantic_version"),
+        release_notes: data.get("release_notes"),
+        art_bible_version_id: data.get("art_bible_version_id"),
         description: data.get("description"),
         prompt_fragment: data.get("prompt_fragment"),
         applicable_topics: commaList(data.get("applicable_topics")),
@@ -1910,6 +2029,23 @@ async function saveStyleVersion(event) {
           accent: data.get("accent"),
           paper: data.get("paper"),
         },
+        visual_traits: {
+          line: data.get("trait_line"),
+          texture: data.get("trait_texture"),
+          lighting: data.get("trait_lighting"),
+          contrast: data.get("trait_contrast"),
+          saturation: data.get("trait_saturation"),
+          whitespace: data.get("trait_whitespace"),
+        },
+        character_design: {
+          proportion: data.get("character_proportion"),
+          expression: data.get("character_expression"),
+          costume: data.get("character_costume"),
+        },
+        avoid: asLines(data.get("avoid")),
+        risks: asLines(data.get("risks")),
+        positive_examples: asLines(data.get("positive_examples")),
+        negative_examples: asLines(data.get("negative_examples")),
         actor: ACTOR,
       }),
     });
@@ -1923,8 +2059,209 @@ async function saveStyleVersion(event) {
   }
 }
 
+function openArtBibleDialog() {
+  const form = document.querySelector("#art-bible-form");
+  form.reset();
+  const current = state.sop.art_bible;
+  if (current?.content) {
+    [
+      "palette_rules",
+      "line_rules",
+      "character_proportion_rules",
+      "spatial_rules",
+      "material_rules",
+      "text_prohibitions",
+      "historical_boundaries",
+    ].forEach((field) => {
+      form.elements[field].value = (current.content[field] || []).join("\n");
+    });
+    const policy = current.content.benchmark_policy || {};
+    Object.entries(policy).forEach(([field, value]) => {
+      if (form.elements[field]) form.elements[field].value = value;
+    });
+  }
+  document.querySelector("#art-bible-dialog").showModal();
+}
+
+async function saveArtBibleVersion(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api("/api/art-bibles", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: project().id,
+        name: data.get("name"),
+        semantic_version: data.get("semantic_version"),
+        release_notes: data.get("release_notes"),
+        content: {
+          palette_rules: asLines(data.get("palette_rules")),
+          line_rules: asLines(data.get("line_rules")),
+          character_proportion_rules: asLines(data.get("character_proportion_rules")),
+          spatial_rules: asLines(data.get("spatial_rules")),
+          material_rules: asLines(data.get("material_rules")),
+          text_prohibitions: asLines(data.get("text_prohibitions")),
+          historical_boundaries: asLines(data.get("historical_boundaries")),
+          benchmark_policy: {
+            benchmark_poem_count: Number(data.get("benchmark_poem_count")),
+            min_poems_per_release: Number(data.get("min_poems_per_release")),
+            min_samples_per_poem: Number(data.get("min_samples_per_poem")),
+            min_style_match_score: Number(data.get("min_style_match_score")),
+            max_off_topic_rate: Number(data.get("max_off_topic_rate")),
+          },
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#art-bible-dialog").close();
+    await refreshSop(`Art Bible ${result.art_bible.semantic_version} 已保存为草稿。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function publishArtBibleVersion(versionId) {
+  if (!window.confirm("发布后仅影响后续新建风格版本，已有版本保持原绑定。确认发布？")) return;
+  try {
+    const result = await api(`/api/art-bibles/${versionId}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ actor: ACTOR }),
+    });
+    await refreshSop(`Art Bible ${result.art_bible.semantic_version} 已发布。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+function openStyleBenchmarkDialog(versionId) {
+  const style = (state.sop.style_packs || []).find((item) => item.id === versionId);
+  if (!style) return;
+  const form = document.querySelector("#style-benchmark-form");
+  form.reset();
+  form.elements.style_version_id.value = versionId;
+  form.elements.provider.value = state.sop.provider_status?.provider || "demo";
+  form.elements.model.value = state.sop.provider_status?.model || "demo-renderer";
+  document.querySelector("#style-benchmark-title").textContent = `${style.name} ${
+    style.semantic_version
+  } · 基准测试`;
+  let checked = 0;
+  document.querySelector("#benchmark-poem-picker").innerHTML = (
+    state.sop.style_benchmark_poems || []
+  )
+    .map((item) => {
+      const eligible =
+        item.poem_status === "ready_for_production" &&
+        directionsForPoem(item.poem_id).some(
+          (direction) => direction.is_current && direction.status === "approved",
+        );
+      const selected = eligible && checked < 5;
+      if (selected) checked += 1;
+      return `<label class="benchmark-poem-option ${eligible ? "" : "is-disabled"}"><input type="checkbox" name="poem_ids" value="${escapeHtml(
+        item.poem_id,
+      )}" ${selected ? "checked" : ""} ${eligible ? "" : "disabled"} /><span><strong>${escapeHtml(
+        item.title,
+      )}</strong><small>${escapeHtml((item.categories || []).join(" · "))}</small><em>${
+        eligible ? "方向已批准" : "需先完成需求与方向审批"
+      }</em></span></label>`;
+    })
+    .join("");
+  updateBenchmarkSelectionNote();
+  document.querySelector("#style-benchmark-dialog").showModal();
+}
+
+function updateBenchmarkSelectionNote() {
+  const count = document.querySelectorAll(
+    '#benchmark-poem-picker input[name="poem_ids"]:checked',
+  ).length;
+  document.querySelector("#benchmark-selection-note").textContent = `${count} 首 · ${
+    count * 4
+  } 张小样${count < 5 ? "，至少还需选择 5 首" : ""}`;
+}
+
+async function saveStyleBenchmark(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  const poemIds = data.getAll("poem_ids");
+  if (poemIds.length < 5) {
+    showToast("至少选择 5 首已准备的基准诗。", "warning");
+    return;
+  }
+  submit.disabled = true;
+  try {
+    const result = await api(`/api/style-packs/${data.get("style_version_id")}/benchmark`, {
+      method: "POST",
+      body: JSON.stringify({
+        poem_ids: poemIds,
+        provider: data.get("provider"),
+        model: data.get("model"),
+        unit_cost: Number(data.get("unit_cost")),
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#style-benchmark-dialog").close();
+    await refreshSop(`基准批次已启动：${result.batch.task_count} 张小样。`);
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function openStyleEvaluationDialog(runId) {
+  const run = (state.sop.style_benchmark_runs || []).find((item) => item.id === runId);
+  if (!run) return;
+  const form = document.querySelector("#style-evaluation-form");
+  form.reset();
+  form.elements.run_id.value = runId;
+  document.querySelector("#style-evaluation-context").innerHTML = `<strong>${escapeHtml(
+    run.style_name,
+  )} ${escapeHtml(run.semantic_version)}</strong><p>${run.poem_ids.length} 首 · ${Number(
+    run.task_count || 0,
+  )} 张小样 · 批次 ${escapeHtml(run.batch_status || "未知")}</p>`;
+  document.querySelector("#style-evaluation-dialog").showModal();
+}
+
+async function saveStyleEvaluation(event) {
+  event.preventDefault();
+  const form = event.target;
+  const submit = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  submit.disabled = true;
+  try {
+    const result = await api(`/api/style-benchmark-runs/${data.get("run_id")}/evaluate`, {
+      method: "POST",
+      body: JSON.stringify({
+        style_match_score: Number(data.get("style_match_score")),
+        off_topic_rate: Number(data.get("off_topic_percent")) / 100,
+        favorite_rate: Number(data.get("favorite_percent")) / 100,
+        notes: data.get("notes"),
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#style-evaluation-dialog").close();
+    await refreshSop(
+      result.run.gate?.passed ? "基准测试通过，可以发布风格版本。" : "基准测试未达标，请修订后重试。",
+    );
+    switchView("resources");
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 async function publishStyleVersion(versionId) {
-  if (!window.confirm("发布后新批次将默认使用此版本，历史批次不受影响。确认发布？")) return;
+  if (!window.confirm("系统将再次核验基准测试和 Art Bible；发布后历史批次不受影响。确认发布？")) return;
   try {
     const result = await api(`/api/style-packs/${versionId}/publish`, {
       method: "POST",
@@ -3272,6 +3609,19 @@ document.addEventListener("click", (event) => {
   const publishStyle = event.target.closest("[data-publish-style]");
   if (publishStyle) publishStyleVersion(publishStyle.dataset.publishStyle);
 
+  const publishArtBible = event.target.closest("[data-publish-art-bible]");
+  if (publishArtBible) publishArtBibleVersion(publishArtBible.dataset.publishArtBible);
+
+  const startStyleBenchmark = event.target.closest("[data-start-style-benchmark]");
+  if (startStyleBenchmark) {
+    openStyleBenchmarkDialog(startStyleBenchmark.dataset.startStyleBenchmark);
+  }
+
+  const evaluateStyleBenchmark = event.target.closest("[data-evaluate-style-benchmark]");
+  if (evaluateStyleBenchmark) {
+    openStyleEvaluationDialog(evaluateStyleBenchmark.dataset.evaluateStyleBenchmark);
+  }
+
   const anomaly = event.target.closest("[data-anomaly-view]");
   if (anomaly) {
     const view = anomaly.dataset.anomalyView;
@@ -3320,6 +3670,9 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.matches('#benchmark-poem-picker input[name="poem_ids"]')) {
+    updateBenchmarkSelectionNote();
+  }
   const checkbox = event.target.closest("[data-select-poem]");
   if (checkbox) {
     if (checkbox.checked) state.selectedPoems.add(checkbox.dataset.selectPoem);
@@ -3410,8 +3763,12 @@ document.querySelector("#current-role").addEventListener("change", (event) => {
 });
 document.querySelector("#open-instruction-button").addEventListener("click", () => openInstructionDialog());
 document.querySelector("#instruction-form").addEventListener("submit", saveInstructionVersion);
+document.querySelector("#open-art-bible-button").addEventListener("click", openArtBibleDialog);
+document.querySelector("#art-bible-form").addEventListener("submit", saveArtBibleVersion);
 document.querySelector("#open-style-button").addEventListener("click", openStyleDialog);
 document.querySelector("#style-form").addEventListener("submit", saveStyleVersion);
+document.querySelector("#style-benchmark-form").addEventListener("submit", saveStyleBenchmark);
+document.querySelector("#style-evaluation-form").addEventListener("submit", saveStyleEvaluation);
 document.querySelector("#requirement-form").addEventListener("submit", saveRequirement);
 document.querySelector("#direction-form").addEventListener("submit", saveDirectionRevision);
 document.querySelector("#open-batch-button").addEventListener("click", openBatchDialog);

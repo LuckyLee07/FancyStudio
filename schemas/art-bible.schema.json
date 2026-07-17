@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fancystudio.local/schemas/art-bible-v1.json",
+  "title": "ArtBibleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "palette_rules",
+    "line_rules",
+    "character_proportion_rules",
+    "spatial_rules",
+    "material_rules",
+    "text_prohibitions",
+    "historical_boundaries",
+    "benchmark_policy"
+  ],
+  "properties": {
+    "palette_rules": {"$ref": "#/$defs/nonEmptyStrings"},
+    "line_rules": {"$ref": "#/$defs/nonEmptyStrings"},
+    "character_proportion_rules": {"$ref": "#/$defs/nonEmptyStrings"},
+    "spatial_rules": {"$ref": "#/$defs/nonEmptyStrings"},
+    "material_rules": {"$ref": "#/$defs/nonEmptyStrings"},
+    "text_prohibitions": {"$ref": "#/$defs/nonEmptyStrings"},
+    "historical_boundaries": {"$ref": "#/$defs/nonEmptyStrings"},
+    "benchmark_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_poem_count",
+        "min_poems_per_release",
+        "min_samples_per_poem",
+        "min_style_match_score",
+        "max_off_topic_rate"
+      ],
+      "properties": {
+        "benchmark_poem_count": {"type": "integer", "minimum": 12, "maximum": 100},
+        "min_poems_per_release": {"type": "integer", "minimum": 5, "maximum": 100},
+        "min_samples_per_poem": {"type": "integer", "minimum": 4, "maximum": 9},
+        "min_style_match_score": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_off_topic_rate": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyStrings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    }
+  }
+}

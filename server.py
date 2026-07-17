@@ -32,6 +32,10 @@ from backup_service import create_backup, list_backups, verify_backup
 from direction_schema import schema_document as direction_schema_document
 from qc_engine import QC_VERSION, inspect_image
 from requirement_schema import schema_document as requirement_schema_document
+from style_schema import (
+    art_bible_schema_document,
+    style_pack_schema_document,
+)
 from sop_store import (
     DEFAULT_PROJECT_ID as SOP_DEFAULT_PROJECT_ID,
     SopStore,
@@ -46,7 +50,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -1433,6 +1437,35 @@ class StudioHandler(BaseHTTPRequestHandler):
             project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
             self._send_json({"items": get_sop_store().instructions(project_id)})
             return
+        if path == "/api/schemas/art-bible":
+            self._send_json(art_bible_schema_document())
+            return
+        if path == "/api/schemas/style-pack":
+            self._send_json(style_pack_schema_document())
+            return
+        if path == "/api/art-bibles":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {"items": get_sop_store().art_bible_versions(project_id)}
+            )
+            return
+        if path == "/api/style-benchmark-poems":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {"items": get_sop_store().benchmark_poems(project_id)}
+            )
+            return
+        if path == "/api/style-benchmark-runs":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {
+                    "items": get_sop_store().style_benchmark_runs(
+                        project_id,
+                        style_version_id=query.get("style_version_id", [None])[0],
+                    )
+                }
+            )
+            return
         if path == "/api/style-packs":
             project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
             try:
@@ -1753,13 +1786,52 @@ class StudioHandler(BaseHTTPRequestHandler):
                     name=str(body.get("name") or ""),
                     short_name=str(body.get("short_name") or ""),
                     description=str(body.get("description") or ""),
+                    semantic_version=str(body.get("semantic_version") or ""),
+                    release_notes=str(body.get("release_notes") or ""),
+                    art_bible_version_id=str(
+                        body.get("art_bible_version_id") or ""
+                    ),
                     prompt_fragment=str(body.get("prompt_fragment") or ""),
                     palette=body.get("palette"),
                     settings=body.get("settings"),
                     applicable_topics=body.get("applicable_topics"),
+                    visual_traits=body.get("visual_traits"),
+                    character_design=body.get("character_design"),
+                    avoid=body.get("avoid"),
+                    risks=body.get("risks"),
+                    positive_examples=body.get("positive_examples"),
+                    negative_examples=body.get("negative_examples"),
                     actor=body.get("actor"),
                 )
                 self._send_json({"style": style}, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/art-bibles":
+            try:
+                body = self._read_json()
+                art_bible = get_sop_store().create_art_bible_version(
+                    str(body.get("project_id") or SOP_DEFAULT_PROJECT_ID),
+                    semantic_version=str(body.get("semantic_version") or ""),
+                    name=str(body.get("name") or ""),
+                    content=body.get("content"),
+                    release_notes=str(body.get("release_notes") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"art_bible": art_bible}, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        art_bible_publish = re.fullmatch(
+            r"/api/art-bibles/(artbible_[a-f0-9]{32})/publish", path
+        )
+        if art_bible_publish:
+            try:
+                body = self._read_json()
+                result = get_sop_store().publish_art_bible_version(
+                    art_bible_publish.group(1), actor=body.get("actor")
+                )
+                self._send_json({"art_bible": result})
             except WorkflowError as exc:
                 self._send_workflow_error(exc)
             return
@@ -1773,6 +1845,60 @@ class StudioHandler(BaseHTTPRequestHandler):
                     style_publish.group(1), actor=body.get("actor")
                 )
                 self._send_json({"style": style})
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        style_benchmark_create = re.fullmatch(
+            r"/api/style-packs/(stylev_[a-f0-9]{32})/benchmark", path
+        )
+        if style_benchmark_create:
+            try:
+                body = self._read_json()
+                created = get_sop_store().create_style_benchmark_run(
+                    style_benchmark_create.group(1),
+                    body.get("poem_ids") or [],
+                    provider=str(body.get("provider") or provider_name()),
+                    model=str(
+                        body.get("model")
+                        or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+                    ),
+                    unit_cost=float(body.get("unit_cost") or 0),
+                    actor=body.get("actor"),
+                )
+                started = get_sop_store().start_style_benchmark(
+                    created["run"]["id"], actor=body.get("actor")
+                )
+                if started["batch"]["status"] != "budget_blocked":
+                    ensure_batch_worker(started["batch"]["id"])
+                self._send_json(started, HTTPStatus.CREATED)
+            except (WorkflowError, TypeError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_BENCHMARK_SETTINGS",
+                            "message": "基准测试参数格式无效。",
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+            return
+        style_benchmark_evaluate = re.fullmatch(
+            r"/api/style-benchmark-runs/(stylebench_[a-f0-9]{32})/evaluate",
+            path,
+        )
+        if style_benchmark_evaluate:
+            try:
+                body = self._read_json()
+                result = get_sop_store().evaluate_style_benchmark(
+                    style_benchmark_evaluate.group(1),
+                    style_match_score=body.get("style_match_score"),
+                    off_topic_rate=body.get("off_topic_rate"),
+                    favorite_rate=body.get("favorite_rate"),
+                    notes=str(body.get("notes") or ""),
+                    actor=body.get("actor"),
+                )
+                self._send_json({"run": result})
             except WorkflowError as exc:
                 self._send_workflow_error(exc)
             return
