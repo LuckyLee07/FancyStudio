@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from qc_engine import inspect_image
+from review_schema import compose_qc_result
 from sop_store import DEFAULT_PROJECT_ID, SopStore, WorkflowError
+from visual_reviewer import review_image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,33 @@ class SopStoreTests(unittest.TestCase):
         )
         return direction_id
 
+    def reviewed_inspection(self, path, task):
+        local = inspect_image(path, task["aspect_ratio"])
+        policy = self.store.published_qc_policy(task["project_id"])
+        prompt = task["prompt"]
+        direction = prompt.get("direction") or {}
+        result, metadata = review_image(
+            path,
+            image_provider="demo",
+            context={
+                "poem": prompt.get("poem") or {},
+                "requirement": (prompt.get("requirement") or {}).get("content") or {},
+                "direction": {
+                    "type": direction.get("type"),
+                    **(direction.get("content") or {}),
+                },
+                "style": prompt.get("style") or {},
+            },
+            policy_version_id=policy["id"],
+        )
+        return compose_qc_result(
+            local,
+            result,
+            policy["content"],
+            policy_version_id=policy["id"],
+            reviewer_metadata=metadata,
+        )
+
     def final_candidate(self, poem_id="shan-ju-qiu-ming", image_id="c" * 32):
         direction_id = self.ready_poem(poem_id)
         batch = self.store.create_batch(
@@ -76,7 +105,7 @@ class SopStoreTests(unittest.TestCase):
             "created_at": "2026-07-18T00:00:00+00:00",
         }
         image = self.store.register_production_image(
-            record, task, inspect_image(path, "portrait")
+            record, task, self.reviewed_inspection(path, task)
         )
         self.store.complete_task(
             task["id"], task["attempt_id"],
@@ -112,6 +141,8 @@ class SopStoreTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["art_bible"]["semantic_version"], "1.0.0")
         self.assertEqual(len(snapshot["style_benchmark_poems"]), 12)
+        self.assertEqual(snapshot["qc_policy"]["content"]["semantic_version"], "1.0.0")
+        self.assertEqual(snapshot["qc_calibration"]["sample_count"], 0)
 
     def test_poem_detail_returns_complete_trace_without_local_asset_paths(self):
         image, _ = self.final_candidate("shan-ju-qiu-ming", "d" * 32)
@@ -1096,9 +1127,8 @@ class SopStoreTests(unittest.TestCase):
             '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1536" viewBox="0 0 1024 1536"><rect width="1024" height="1536" fill="#eee8dc"/><circle cx="530" cy="420" r="140" fill="#8ca6a0"/></svg>',
             encoding="utf-8",
         )
-        inspection = inspect_image(path, "portrait")
-
         first = self.store.claim_next_task(batch["id"])
+        inspection = self.reviewed_inspection(path, first)
         first_record = {
             "id": "a" * 32,
             "url": "/generated/first.svg",
@@ -1244,6 +1274,50 @@ class SopStoreTests(unittest.TestCase):
             manifest_asset["file"]["checksum_sha256"],
         )
         self.assertEqual(self.store.list_poems(status="exported")["total"], 1)
+
+    def test_historical_score_blocks_final_asset_until_explicit_qc_override(self):
+        image, _ = self.final_candidate("shan-ju-qiu-ming", "e" * 32)
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT id, scores_json FROM qc_results WHERE image_id = ?",
+                (image["id"],),
+            ).fetchone()
+            scores = json.loads(row[1])
+            scores["historical_plausibility"] = 55
+            connection.execute(
+                "UPDATE qc_results SET scores_json = ? WHERE id = ?",
+                (json.dumps(scores, ensure_ascii=False), row[0]),
+            )
+        self.store.finalize_image(
+            image["id"],
+            reviewer_type="content",
+            decision="approved",
+            reason="内容无误，但历史细节需覆盖留痕。",
+            actor={"id": "content-final", "role": "content_editor"},
+        )
+        with self.assertRaises(WorkflowError) as blocked:
+            self.store.finalize_image(
+                image["id"],
+                reviewer_type="art",
+                decision="approved",
+                reason="美术终审。",
+                actor={"id": "art-final", "role": "art_director"},
+            )
+        self.assertEqual(blocked.exception.code, "HISTORICAL_QC_BLOCKS_FINALIZATION")
+        self.store.override_qc(
+            image["id"],
+            "pass",
+            reason="内容编辑核对史料后确认该处可接受。",
+            actor={"id": "producer-final", "role": "producer"},
+        )
+        result = self.store.finalize_image(
+            image["id"],
+            reviewer_type="art",
+            decision="approved",
+            reason="美术终审通过。",
+            actor={"id": "art-final", "role": "art_director"},
+        )
+        self.assertTrue(result["locked"])
 
 
 if __name__ == "__main__":

@@ -59,7 +59,10 @@
 - Demo / OpenAI Provider 通过同一持久 Worker 执行并回写候选；
 - ProductionImage、QCResult、人工覆盖、审片决策和返工单生产模型；
 - 文件完整性、尺寸、比例、SVG 文字和 PNG / SVG 相似指纹质检；
-- 硬失败隔离、软风险提示、人工 QC 覆盖和按诗候选路由；
+- ReviewResult v1 与 QCPolicy v1：八维结构化评分、可见证据、问题码、置信度、政策权重和确定性分流；
+- OpenAI Responses 多模态视觉质检适配器，支持诗意、风格、历史、构图、人物、文字风险与系列一致性审查；
+- 硬失败隔离、视觉服务故障自动降级人工 QC、人工覆盖和按推荐等级 / 分数排序的候选路由；
+- 100 张人工校准集工作流：记录人工结论、维度分、误放 / 误杀矩阵和维度平均误差；
 - 按诗分组审片、大图、2–4 张 A/B 对比与键盘快捷决策；
 - 结构化审片理由和“保持 / 修改 / 禁止”返工单；
 - 返工自动进入高优先级持久队列，并回写母子图谱系与代次；
@@ -113,7 +116,18 @@ python3 server.py
 ```bash
 export OPENAI_IMAGE_MODEL="gpt-image-2"
 export OPENAI_IMAGE_QUALITY="medium"
+export OPENAI_VISION_QC_MODEL="gpt-5.6-luna"
 ```
+
+视觉质检默认与真实 OpenAI 图像 Provider 一起启用。可显式关闭或配置成本估算：
+
+```bash
+export TANG_VISION_QC_ENABLED="0"
+export TANG_VISION_QC_INPUT_COST_PER_M="0"
+export TANG_VISION_QC_OUTPUT_COST_PER_M="0"
+```
+
+视觉质检关闭、未配置或调用失败时，图片仍会安全入库，但状态固定为“需人工 QC”，不会自动进入正常候选池。演示模式使用明确标记的合成评分器，只验证工作流，不代表真实视觉判断。
 
 也可以固定运行模式：
 
@@ -134,11 +148,15 @@ FancyStudio/
 ├─ requirement_schema.py      RequirementCard v1 校验、一次修复与置信度规则
 ├─ direction_schema.py        DirectionProposal v1、事实分层与三方向差异门禁
 ├─ style_schema.py            Art Bible v1 / StylePack v1 合同与发布字段校验
+├─ review_schema.py           ReviewResult v1、QCPolicy v1 与确定性评分门禁
+├─ visual_reviewer.py         多模态视觉审查适配器与安全降级
 ├─ schemas/
 │  ├─ requirement-card.schema.json  需求卡 JSON Schema
 │  ├─ direction-proposal.schema.json 画面方向 JSON Schema
 │  ├─ art-bible.schema.json         全局视觉圣经 JSON Schema
-│  └─ style-pack.schema.json        风格包 JSON Schema
+│  ├─ style-pack.schema.json        风格包 JSON Schema
+│  ├─ review-result.schema.json     视觉审查结果 JSON Schema
+│  └─ qc-policy.schema.json         质检政策 JSON Schema
 ├─ qc_engine.py               离线技术质检、格式解析与相似指纹
 ├─ backup_service.py          数据库与资产备份、校验和安全恢复
 ├─ backup_tool.py             离线备份 / 列表 / 校验 / 恢复命令
@@ -151,6 +169,7 @@ FancyStudio/
 │  ├─ poems.json              当前基准诗种子数据
 │  ├─ benchmark_poems.json    12 首风格测试集与误读 / 历史风险标签
 │  ├─ art_bible.json          Art Bible v1 种子数据
+│  ├─ qc_policy.json          QCPolicy v1 权重与阈值种子
 │  ├─ styles.json             当前风格包种子数据
 │  ├─ state.json              旧生成任务与图片数据，待迁入 SQLite
 │  ├─ generated/              本地生成图片
@@ -164,6 +183,8 @@ FancyStudio/
    ├─ test_requirement_schema.py Schema、修复、缓存、隔离失败与恢复
    ├─ test_direction_schema.py 三方向合同、差异门禁、原子写入与恢复
    ├─ test_style_schema.py    Art Bible / StylePack 合同与语义版本校验
+   ├─ test_review_schema.py   八维评分、政策门禁与历史交付门槛
+   ├─ test_visual_reviewer.py 多模态请求合同、演示评分与安全降级
    ├─ test_frontend_contract.py 页面与脚本契约
    └─ test_server.py          HTTP API、生成、编辑、评审与完整流程
 ```
@@ -206,6 +227,7 @@ python3 -m unittest discover -s tests -v
 - 服务中断后的结果未知保护与显式确认重试；
 - 批次 API 到 Worker 产图回写的端到端流程；
 - 技术 QC、重复隔离、人工覆盖和候选路由；
+- 视觉 QC 结构化输出、确定性阈值、故障降级、校准样本和历史交付门禁；
 - 结构化审片、自动返工任务与二代子图谱系；
 - 内容 / 美术双终审、FinalAsset 唯一当前版本与历史版本；
 - 重复导出不覆盖、Manifest 全链路与文件校验和；
@@ -228,7 +250,8 @@ python3 -m unittest discover -s tests -v
 - 当前种子数据为 12 首基准诗，尚未导入完整 300 首生产数据；
 - Requirement 与 Direction 当前使用可测试的结构化本地策划器，真实文本模型适配将在后续接入；
 - 风格基准流程已强制样本数量与人工评分门槛；语义风格匹配、跑题和构图多样性仍需视觉模型与人工标注集校准；
-- 当前本地 QC 已覆盖可证明的技术检查；栅格文字 / 品牌识别以及语义、历史、美术模型仍需后续视觉模型和人工标注集校准；
+- 真实图像 Provider 已接入多模态语义、历史和美术风险审查；其结果是生产筛查而非学术认证，栅格文字 / 品牌识别和阈值仍需至少 100 张人工标注图校准；
+- 系列一致性目前由单图上下文评分，尚未接入同诗候选与全库视觉向量，因此跨诗构图重复和真正的集合多样性排序仍待实现；
 - 当前只支持纯图导出，诗卡、课程配图和多规格派生仍待实现；
 - 当前为单机单用户版本；岗位切换用于本地 SOP 分工演示和服务端门禁联调，不是身份认证，也不具备公网部署所需的登录、完整权限和速率限制；
 - 历史合理性仍需内容编辑或顾问人工终审。

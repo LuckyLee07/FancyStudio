@@ -24,6 +24,9 @@ const state = {
     style_benchmark_poems: [],
     style_benchmark_runs: [],
     style_contracts: null,
+    qc_policy: null,
+    qc_policy_versions: [],
+    qc_calibration: null,
     provider_status: null,
     production_report: { daily: [], anomalies: [], tasks: {} },
     batches: [],
@@ -151,6 +154,24 @@ const productionImageStatusMeta = {
   selected: ["已入选", "success"],
   rejected: ["已淘汰", "neutral"],
   final_candidate: ["终审候选", "success"],
+};
+
+const qcDecisionMeta = {
+  rejected: ["自动拒绝", "danger"],
+  manual_review: ["人工复核", "warning"],
+  candidate: ["合格候选", "ready"],
+  recommended: ["优先推荐", "success"],
+};
+
+const qcDimensionLabels = {
+  safety: "安全",
+  technical_integrity: "技术完整",
+  poem_relevance: "诗意相关",
+  style_match: "风格匹配",
+  historical_plausibility: "历史合理",
+  composition: "构图",
+  character_quality: "人物质量",
+  series_consistency: "系列一致",
 };
 
 function escapeHtml(value) {
@@ -556,6 +577,8 @@ function renderProductionReport() {
     ["返工单", report.reworks || 0],
     ["终审成品", report.finalized || 0],
     ["任务成功率", `${Number(report.tasks?.success_rate || 0).toFixed(1)}%`],
+    ["QC 均分", Number(report.qc?.average_score || 0).toFixed(1)],
+    ["待人工 QC", report.qc?.manual_review || 0],
     ["实际成本", Number(report.actual_cost || 0).toFixed(2)],
   ];
   document.querySelector("#report-metrics").innerHTML = reportMetrics
@@ -1370,9 +1393,21 @@ function productionImageCard(image) {
         <div><strong>${escapeHtml(image.batch_name)}</strong><small>${escapeHtml(
           image.style_id,
         )} · ${escapeHtml(image.provider)}</small></div>
-        ${statusBadge(image.status, productionImageStatusMeta)}
+        <div>${statusBadge(qc.decision || "manual_review", qcDecisionMeta)}${statusBadge(
+          image.status,
+          productionImageStatusMeta,
+        )}</div>
       </div>
       <div class="review-risk-row">
+        ${(qc.problems || [])
+          .slice(0, 2)
+          .map(
+            (problem) =>
+              `<span class="${problem.severity === "critical" ? "is-danger" : ""}" title="${escapeHtml(
+                problem.evidence || "",
+              )}">${escapeHtml(problem.code)} · ${escapeHtml(problem.note)}</span>`,
+          )
+          .join("")}
         ${(qc.hard_failures || [])
           .slice(0, 2)
           .map((risk) => `<span class="is-danger">${escapeHtml(risk)}</span>`)
@@ -1383,7 +1418,9 @@ function productionImageCard(image) {
           .join("")}
       </div>
       <footer>
-        <span>QC ${escapeHtml(qc.version || "—")} · ${image.width}×${image.height}</span>
+        <span>${escapeHtml(qc.reviewer_kind || "local")} · ${Math.round(
+          Number(qc.confidence || 0) * 100,
+        )}% 置信 · ${image.width}×${image.height}</span>
         <button class="secondary-button" type="button" data-open-image="${image.id}">进入审片</button>
       </footer>
     </article>`;
@@ -1407,9 +1444,10 @@ function renderReview() {
   );
   document.querySelector("#review-summary").innerHTML = [
     ["待审候选", queue.summary.review_ready || 0],
+    ["优先推荐", queue.summary.recommended || 0],
     ["已入选", queue.summary.selected || 0],
-    ["终审候选", queue.summary.final_candidate || 0],
-    ["QC 隔离", queue.summary.qc_blocked || 0],
+    ["待人工 QC", queue.summary.needs_manual_qc || 0],
+    ["硬失败", queue.summary.qc_hard_blocked || 0],
   ]
     .map(
       ([label, value]) =>
@@ -1567,6 +1605,11 @@ function renderResources() {
       ),
   ).length;
   const provider = state.sop.provider_status || state.legacy.config.provider_status || {};
+  const visualQc = provider.visual_qc || {};
+  const qcPolicy = state.sop.qc_policy || {};
+  const qcPolicyContent = qcPolicy.content || {};
+  const qcThresholds = qcPolicyContent.thresholds || {};
+  const qcCalibration = state.sop.qc_calibration || {};
   const budget = state.sop.budget || {};
   const hardLimit = Number(budget.hard_limit || 0);
   const spent = Number(budget.spent || 0);
@@ -1629,6 +1672,57 @@ function renderResources() {
         <button class="secondary-button" type="submit">保存预算规则</button>
       </form>
       <p>批次启动与失败重试都会重新校验可用余额；超出硬上限时不会调用 Provider。</p>
+    </article>
+    <article class="resource-panel qc-policy-panel">
+      <span class="resource-label">VISUAL QC POLICY</span>
+      <div class="qc-policy-title"><div><h3>${escapeHtml(
+        qcPolicyContent.name || "自动质检政策未发布",
+      )}</h3><small>${escapeHtml(qcPolicyContent.semantic_version || "—")} · ${escapeHtml(
+        qcPolicy.schema_version || "qc-policy/v1",
+      )}</small></div>${statusBadge(
+        visualQc.status === "ready" || visualQc.status === "synthetic_demo"
+          ? "ready"
+          : "manual_review",
+        {
+          ready: [visualQc.real_visual_review ? "视觉 QC 已连接" : "演示评分器", "success"],
+          manual_review: ["降级为人工 QC", "warning"],
+        },
+      )}</div>
+      <p>${
+        visualQc.real_visual_review
+          ? `使用 ${escapeHtml(visualQc.model || "视觉模型")} 进行结构化多模态审查；确定性政策负责最终分流。`
+          : visualQc.status === "synthetic_demo"
+          ? "当前分数仅用于演示生产状态流，不代表真实视觉判断。"
+          : "视觉审查未配置或已关闭，技术检查通过的图片仍会进入人工 QC，不会自动成为候选。"
+      }</p>
+      <div class="qc-threshold-grid">
+        <span><small>拒绝</small><strong>&lt; ${Number(qcThresholds.reject_below || 60)}</strong></span>
+        <span><small>人工复核</small><strong>&lt; ${Number(qcThresholds.manual_review_below || 75)}</strong></span>
+        <span><small>候选</small><strong>${Number(qcThresholds.manual_review_below || 75)}+</strong></span>
+        <span><small>推荐</small><strong>${Number(qcThresholds.recommended_from || 85)}+</strong></span>
+      </div>
+      <div class="qc-calibration-progress">
+        <div><span>人工校准样本</span><strong>${Number(qcCalibration.sample_count || 0)} / ${Number(
+          qcCalibration.target_count || 100,
+        )}</strong></div>
+        <div class="budget-bar"><span style="width:${Math.min(
+          100,
+          Math.round(
+            (Number(qcCalibration.sample_count || 0) /
+              Math.max(1, Number(qcCalibration.target_count || 100))) *
+              100,
+          ),
+        )}%"></span></div>
+        <small>误放 ${
+          qcCalibration.false_pass_rate == null
+            ? "待采样"
+            : `${(Number(qcCalibration.false_pass_rate) * 100).toFixed(1)}%`
+        } · 误杀 ${
+          qcCalibration.false_reject_rate == null
+            ? "待采样"
+            : `${(Number(qcCalibration.false_reject_rate) * 100).toFixed(1)}%`
+        }</small>
+      </div>
     </article>
     <article class="resource-panel backup-panel">
       <span class="resource-label">BACKUP & RECOVERY</span>
@@ -3126,8 +3220,9 @@ function openProductionImage(imageId) {
   document.querySelector("#image-dialog-copy").innerHTML = `
     <div class="review-dialog-status">
       ${statusBadge(image.status, productionImageStatusMeta)}
+      ${statusBadge(qc.decision || "manual_review", qcDecisionMeta)}
       <strong>QC ${Math.round(Number(qc.score || 0))}</strong>
-      <span>${escapeHtml(qc.version || "无版本")}</span>
+      <span>${escapeHtml(qc.policy_version_id || "无政策版本")}</span>
     </div>
     <h3>${escapeHtml(image.poem_title)} · ${escapeHtml(image.author)}</h3>
     <p>${escapeHtml(directionTypeMeta[image.direction_type]?.[0] || image.direction_type)} · 第 ${
@@ -3142,6 +3237,10 @@ function openProductionImage(imageId) {
         image.mime_type,
       )}</dd></div>
       <div><dt>谱系</dt><dd>第 ${image.generation} 代 · ${image.child_count} 个子候选</dd></div>
+      <div><dt>视觉审查</dt><dd>${escapeHtml(qc.reviewer_kind || "未执行")} · ${escapeHtml(
+        qc.reviewer_model || "—",
+      )}</dd></div>
+      <div><dt>置信度</dt><dd>${Math.round(Number(qc.confidence || 0) * 100)}%</dd></div>
     </dl>
     <section class="source-trace-panel">
       <div class="source-trace-head"><strong>生产证据链</strong><span>${escapeHtml(
@@ -3169,7 +3268,32 @@ function openProductionImage(imageId) {
       )}</code>
     </section>
     <section class="qc-detail ${blocked ? "is-blocked" : ""}">
-      <div><strong>自动 QC</strong><span>${escapeHtml(qc.status || "未执行")}</span></div>
+      <div><strong>自动 QC · ${escapeHtml(qc.version || "未执行")}</strong><span>${escapeHtml(
+        qc.status || "未执行",
+      )}</span></div>
+      <div class="qc-score-grid">
+        ${Object.entries(qcDimensionLabels)
+          .map(
+            ([field, label]) => `<article><small>${label}</small><strong>${
+              qc.scores?.[field] == null ? "—" : Math.round(Number(qc.scores[field]))
+            }</strong></article>`,
+          )
+          .join("")}
+      </div>
+      <div class="qc-problem-list">
+        ${(qc.problems || [])
+          .map(
+            (problem) => `<article class="severity-${escapeHtml(problem.severity)}">
+              <div><strong>${escapeHtml(problem.code)}</strong><span>${escapeHtml(
+                qcDimensionLabels[problem.dimension] || problem.dimension,
+              )} · ${escapeHtml(problem.severity)}</span></div>
+              <p>${escapeHtml(problem.note)}</p><small>可见证据：${escapeHtml(
+                problem.evidence,
+              )}</small>
+            </article>`,
+          )
+          .join("")}
+      </div>
       <ul>
         ${(qc.hard_failures || [])
           .map((item) => `<li class="is-danger">硬失败 · ${escapeHtml(item)}</li>`)
@@ -3183,6 +3307,34 @@ function openProductionImage(imageId) {
           ? `<p>相似候选：${escapeHtml(qc.duplicate_of.slice(-8))}</p>`
           : ""
       }
+      ${
+        (qc.evidence?.observed_elements || []).length ||
+        (qc.evidence?.missing_required_elements || []).length ||
+        (qc.evidence?.uncertain_elements || []).length
+          ? `<details class="qc-evidence"><summary>查看模型观察证据</summary>
+              <p><strong>已观察：</strong>${escapeHtml(
+                (qc.evidence?.observed_elements || []).join("、") || "无",
+              )}</p>
+              <p><strong>缺失项：</strong>${escapeHtml(
+                (qc.evidence?.missing_required_elements || []).join("、") || "无",
+              )}</p>
+              <p><strong>不确定：</strong>${escapeHtml(
+                (qc.evidence?.uncertain_elements || []).join("、") || "无",
+              )}</p>
+            </details>`
+          : ""
+      }
+    </section>
+    <section class="qc-calibration-panel" data-role-allow="content_editor,art_director,producer,system_admin">
+      <div><strong>人工校准标签</strong><span>用于评估误放、误杀与阈值偏差，不会改写本次自动结果</span></div>
+      <div>
+        ${Object.entries(qcDecisionMeta)
+          .map(
+            ([decision, meta]) =>
+              `<button class="secondary-button" type="button" data-qc-calibration="${decision}" data-image-id="${image.id}">${meta[0]}</button>`,
+          )
+          .join("")}
+      </div>
     </section>
     <details><summary>查看冻结的六段式 Prompt</summary><p>${escapeHtml(
       [
@@ -3303,6 +3455,27 @@ async function overrideProductionQc(imageId, decision) {
     });
     document.querySelector("#image-dialog").close();
     await refreshSop("人工 QC 覆盖已记录，原自动结果保持不变。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function submitQcCalibration(imageId, humanDecision) {
+  const reason = document.querySelector("#review-reason-tag")?.value || "";
+  const note = document.querySelector("#review-decision-note")?.value.trim() || "";
+  try {
+    await api(`/api/images/${imageId}/qc-calibration`, {
+      method: "POST",
+      body: JSON.stringify({
+        human_decision: humanDecision,
+        human_scores: {},
+        reason_tags: reason ? [reason] : [],
+        note,
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#image-dialog").close();
+    await refreshSop("人工校准样本已记录；自动 QC 原始结论保持不变。");
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -3571,6 +3744,14 @@ document.addEventListener("click", (event) => {
   const qcOverride = event.target.closest("[data-qc-override]");
   if (qcOverride) {
     overrideProductionQc(qcOverride.dataset.imageId, qcOverride.dataset.qcOverride);
+  }
+
+  const qcCalibration = event.target.closest("[data-qc-calibration]");
+  if (qcCalibration) {
+    submitQcCalibration(
+      qcCalibration.dataset.imageId,
+      qcCalibration.dataset.qcCalibration,
+    );
   }
 
   const finalApproval = event.target.closest("[data-final-reviewer]");

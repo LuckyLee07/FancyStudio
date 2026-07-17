@@ -33,6 +33,10 @@ class TangPoemStudioTests(unittest.TestCase):
             server.ROOT / "data" / "benchmark_poems.json",
             data_dir / "benchmark_poems.json",
         )
+        shutil.copy(
+            server.ROOT / "data" / "qc_policy.json",
+            data_dir / "qc_policy.json",
+        )
 
         server.DATA_DIR = data_dir
         server.GENERATED_DIR = generated_dir
@@ -261,7 +265,23 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertEqual(len(bootstrap["style_benchmark_poems"]), 12)
         self.assertEqual(bootstrap["art_bible"]["semantic_version"], "1.0.0")
         self.assertEqual(bootstrap["provider_status"]["provider"], "demo")
+        self.assertEqual(
+            bootstrap["provider_status"]["visual_qc"]["status"],
+            "synthetic_demo",
+        )
+        self.assertEqual(bootstrap["qc_policy"]["content"]["semantic_version"], "1.0.0")
+        self.assertEqual(bootstrap["qc_calibration"]["target_count"], 100)
         self.assertIn("anomalies", bootstrap["production_report"])
+
+        status, review_schema = self.request_json("/api/schemas/review-result")
+        self.assertEqual(status, 200)
+        self.assertEqual(review_schema["title"], "ReviewResult v1")
+        status, policy_schema = self.request_json("/api/schemas/qc-policy")
+        self.assertEqual(status, 200)
+        self.assertEqual(policy_schema["title"], "QCPolicy v1")
+        status, policies = self.request_json("/api/qc-policies")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(policies["items"]), 1)
 
         status, report = self.request_json("/api/reports/production?days=14")
         self.assertEqual(status, 200)
@@ -712,11 +732,30 @@ class TangPoemStudioTests(unittest.TestCase):
         candidate = next(
             item for item in candidates if item["status"] == "review_ready"
         )
-        self.assertIn(candidate["qc"]["status"], {"pass", "soft_risk"})
+        self.assertEqual(candidate["qc"]["status"], "pass")
+        self.assertIn(candidate["qc"]["decision"], {"candidate", "recommended"})
+        self.assertEqual(candidate["qc"]["reviewer_kind"], "synthetic_demo")
+        self.assertEqual(len(candidate["qc"]["scores"]), 8)
         self.assertEqual(candidate["prompt_template_version"], "demo-six-segment-v3")
         self.assertEqual(len(candidate["prompt_hash"]), 64)
         self.assertIn("instruction", candidate["prompt_segments"])
         self.assertIn("style", candidate["prompt_segments"])
+        status, calibration = self.request_json(
+            f"/api/images/{candidate['id']}/qc-calibration",
+            method="POST",
+            payload={
+                "human_decision": "candidate",
+                "human_scores": {"poem_relevance": 84},
+                "reason_tags": ["诗意准确"],
+                "note": "API 校准测试",
+                "actor": {"id": "producer-api", "role": "producer"},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(calibration["sample"]["predicted_decision"], candidate["qc"]["decision"])
+        status, calibration_report = self.request_json("/api/qc-calibration")
+        self.assertEqual(status, 200)
+        self.assertEqual(calibration_report["sample_count"], 1)
         status, decision = self.request_json(
             f"/api/images/{candidate['id']}/decision",
             method="POST",

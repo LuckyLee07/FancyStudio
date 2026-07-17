@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tang-poem-studio.local/schemas/review-result-v1.json",
+  "title": "ReviewResult v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "overall_score",
+    "scores",
+    "has_unexpected_text",
+    "hard_fail_reasons",
+    "problems",
+    "decision",
+    "confidence",
+    "evidence",
+    "reviewer_version"
+  ],
+  "properties": {
+    "schema_version": {"const": "review-result/v1"},
+    "overall_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safety",
+        "technical_integrity",
+        "poem_relevance",
+        "style_match",
+        "historical_plausibility",
+        "composition",
+        "character_quality",
+        "series_consistency"
+      ],
+      "properties": {
+        "safety": {"type": "integer", "minimum": 0, "maximum": 100},
+        "technical_integrity": {"type": "integer", "minimum": 0, "maximum": 100},
+        "poem_relevance": {"type": "integer", "minimum": 0, "maximum": 100},
+        "style_match": {"type": "integer", "minimum": 0, "maximum": 100},
+        "historical_plausibility": {"type": "integer", "minimum": 0, "maximum": 100},
+        "composition": {"type": "integer", "minimum": 0, "maximum": 100},
+        "character_quality": {"type": "integer", "minimum": 0, "maximum": 100},
+        "series_consistency": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "has_unexpected_text": {"type": "boolean"},
+    "hard_fail_reasons": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {"type": "string", "minLength": 2, "maxLength": 80}
+    },
+    "problems": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "dimension", "severity", "note", "evidence"],
+        "properties": {
+          "code": {"type": "string", "minLength": 2, "maxLength": 80},
+          "dimension": {
+            "enum": [
+              "safety",
+              "technical_integrity",
+              "poem_relevance",
+              "style_match",
+              "historical_plausibility",
+              "composition",
+              "character_quality",
+              "series_consistency",
+              "text_noise"
+            ]
+          },
+          "severity": {"enum": ["low", "medium", "high", "critical"]},
+          "note": {"type": "string", "minLength": 2, "maxLength": 300},
+          "evidence": {"type": "string", "minLength": 2, "maxLength": 300}
+        }
+      }
+    },
+    "decision": {"enum": ["rejected", "manual_review", "candidate", "recommended"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_elements", "missing_required_elements", "uncertain_elements"],
+      "properties": {
+        "observed_elements": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+        },
+        "missing_required_elements": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+        },
+        "uncertain_elements": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120}
+        }
+      }
+    },
+    "reviewer_version": {"type": "string", "minLength": 2, "maxLength": 100}
+  }
+}

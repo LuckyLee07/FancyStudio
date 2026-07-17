@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from qc_engine import EXPECTED_RATIOS, hamming_distance
+from review_schema import QC_POLICY_SCHEMA_VERSION, validate_qc_policy
 from prompt_compiler import PromptCompileError, compile_generation_prompt
 from direction_schema import (
     GENERATOR_VERSION as DIRECTION_GENERATOR_VERSION,
@@ -76,6 +77,7 @@ STYLE_BENCHMARK_STATUSES = {
     "failed",
     "cancelled",
 }
+QC_POLICY_STATUSES = {"draft", "published", "retired"}
 
 BATCH_STATUSES = {
     "draft",
@@ -215,6 +217,7 @@ class SopStore:
         self.benchmark_poem_seed_path = (
             self.poem_seed_path.parent / "benchmark_poems.json"
         )
+        self.qc_policy_seed_path = self.poem_seed_path.parent / "qc_policy.json"
         self.lock = threading.RLock()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
@@ -1005,6 +1008,100 @@ class SopStore:
                     COMMIT;
                     """
                 )
+            if 11 not in applied:
+                connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+
+                    CREATE TABLE qc_policy_versions (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        version INTEGER NOT NULL,
+                        semantic_version TEXT NOT NULL,
+                        schema_version TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        release_notes TEXT NOT NULL,
+                        content_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        published_at TEXT,
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(project_id, version),
+                        UNIQUE(project_id, semantic_version)
+                    );
+
+                    CREATE INDEX idx_qc_policy_project_status
+                    ON qc_policy_versions(project_id, status, version);
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN policy_version_id TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN scores_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN problems_json TEXT NOT NULL DEFAULT '[]';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN decision TEXT NOT NULL DEFAULT 'manual_review';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN confidence REAL NOT NULL DEFAULT 0;
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN reviewer_kind TEXT NOT NULL DEFAULT 'legacy';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN input_hash TEXT NOT NULL DEFAULT '';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}';
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN estimated_cost REAL NOT NULL DEFAULT 0;
+
+                    ALTER TABLE qc_results
+                    ADD COLUMN raw_visual_score REAL;
+
+                    CREATE INDEX idx_qc_results_decision_created
+                    ON qc_results(decision, created_at);
+
+                    CREATE INDEX idx_qc_results_policy_created
+                    ON qc_results(policy_version_id, created_at);
+
+                    CREATE TABLE qc_calibration_samples (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES production_projects(id),
+                        image_id TEXT NOT NULL REFERENCES production_images(id),
+                        qc_result_id TEXT NOT NULL REFERENCES qc_results(id),
+                        predicted_decision TEXT NOT NULL,
+                        human_decision TEXT NOT NULL,
+                        human_scores_json TEXT NOT NULL DEFAULT '{}',
+                        reason_tags_json TEXT NOT NULL DEFAULT '[]',
+                        note TEXT NOT NULL DEFAULT '',
+                        actor_id TEXT NOT NULL,
+                        actor_role TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX idx_qc_calibration_project_created
+                    ON qc_calibration_samples(project_id, created_at);
+
+                    CREATE INDEX idx_qc_calibration_result_created
+                    ON qc_calibration_samples(qc_result_id, created_at);
+
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (11, CURRENT_TIMESTAMP);
+
+                    COMMIT;
+                    """
+                )
 
     def _recover_interrupted_work(self) -> None:
         """Make crash recovery explicit without automatically repeating billed work."""
@@ -1100,6 +1197,7 @@ class SopStore:
         styles = self._read_seed(self.style_seed_path)
         art_bibles = self._read_seed(self.art_bible_seed_path)
         benchmark_poems = self._read_seed(self.benchmark_poem_seed_path)
+        qc_policies = self._read_seed(self.qc_policy_seed_path)
         now = utc_now()
         default_style = styles[0]["id"] if styles else ""
         instruction_content = {
@@ -1202,6 +1300,29 @@ class SopStore:
                         now,
                     ),
                 )
+                for index, qc_policy in enumerate(qc_policies, start=1):
+                    policy = validate_qc_policy(qc_policy)
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO qc_policy_versions(
+                            id, project_id, version, semantic_version,
+                            schema_version, name, release_notes, content_json,
+                            status, published_at, created_by, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, 'seed', ?)
+                        """,
+                        (
+                            f"qcpolicy_global_v{index}",
+                            DEFAULT_PROJECT_ID,
+                            index,
+                            policy["semantic_version"],
+                            QC_POLICY_SCHEMA_VERSION,
+                            policy["name"],
+                            policy["release_notes"],
+                            _json(policy),
+                            now,
+                            now,
+                        ),
+                    )
                 for art_bible in art_bibles:
                     content = art_bible.get("content") or {}
                     issues = validate_art_bible(content)
@@ -1575,6 +1696,12 @@ class SopStore:
         return item
 
     @staticmethod
+    def _qc_policy_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["content"] = _decode(item.pop("content_json", None), {})
+        return item
+
+    @staticmethod
     def _batch_dict(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["budget_snapshot"] = _decode(item.pop("budget_snapshot_json", None), {})
@@ -1601,6 +1728,10 @@ class SopStore:
         item["warnings"] = _decode(item.pop("warnings_json", None), [])
         item["checks"] = _decode(item.pop("checks_json", None), {})
         item["coverage"] = _decode(item.pop("coverage_json", None), [])
+        item["scores"] = _decode(item.pop("scores_json", None), {})
+        item["problems"] = _decode(item.pop("problems_json", None), [])
+        item["evidence"] = _decode(item.pop("evidence_json", None), {})
+        item["usage"] = _decode(item.pop("usage_json", None), {})
         return item
 
     @staticmethod
@@ -1822,6 +1953,25 @@ class SopStore:
                 """,
                 (project_id, cutoff),
             ).fetchone()["cost"]
+            qc_metrics = dict(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           AVG(q.score) AS average_score,
+                           SUM(CASE WHEN q.decision = 'recommended' THEN 1 ELSE 0 END) AS recommended,
+                           SUM(CASE WHEN q.decision = 'candidate' THEN 1 ELSE 0 END) AS candidate,
+                           SUM(CASE WHEN q.decision = 'manual_review' THEN 1 ELSE 0 END) AS manual_review,
+                           SUM(CASE WHEN q.decision = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                           COALESCE(SUM(q.estimated_cost), 0) AS estimated_cost
+                    FROM qc_results q
+                    JOIN production_images i ON i.id = q.image_id
+                    JOIN generation_batches b ON b.id = i.batch_id
+                    WHERE i.project_id = ? AND b.purpose != 'style_benchmark'
+                      AND q.created_at >= ?
+                    """,
+                    (project_id, cutoff),
+                ).fetchone()
+            )
             task_daily = connection.execute(
                 """
                 SELECT substr(COALESCE(t.finished_at, t.updated_at), 1, 10) AS day,
@@ -1958,7 +2108,24 @@ class SopStore:
             "reworks": int(reworks or 0),
             "finalized": int(finalized or 0),
             "exported_assets": int(exported or 0),
-            "actual_cost": round(float(cost or 0), 6),
+            "actual_cost": round(
+                float(cost or 0) + float(qc_metrics.get("estimated_cost") or 0),
+                6,
+            ),
+            "generation_cost": round(float(cost or 0), 6),
+            "visual_qc_cost": round(
+                float(qc_metrics.get("estimated_cost") or 0), 6
+            ),
+            "qc": {
+                "total": int(qc_metrics.get("total") or 0),
+                "average_score": round(
+                    float(qc_metrics.get("average_score") or 0), 1
+                ),
+                "recommended": int(qc_metrics.get("recommended") or 0),
+                "candidate": int(qc_metrics.get("candidate") or 0),
+                "manual_review": int(qc_metrics.get("manual_review") or 0),
+                "rejected": int(qc_metrics.get("rejected") or 0),
+            },
             "tasks": {
                 "total": int(task_metrics.get("total") or 0),
                 "succeeded": int(task_metrics.get("succeeded") or 0),
@@ -3100,6 +3267,262 @@ class SopStore:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def qc_policy_versions(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> list[dict[str, Any]]:
+        self.project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM qc_policy_versions
+                WHERE project_id = ?
+                ORDER BY version DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._qc_policy_dict(row) for row in rows]
+
+    def published_qc_policy(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM qc_policy_versions
+                WHERE project_id = ? AND status = 'published'
+                ORDER BY version DESC LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+        if not row:
+            raise WorkflowError(
+                "QC_POLICY_REQUIRED",
+                "项目缺少已发布的自动质检政策。",
+                status=409,
+            )
+        return self._qc_policy_dict(row)
+
+    def record_qc_calibration(
+        self,
+        image_id: str,
+        *,
+        human_decision: str,
+        human_scores: dict[str, Any] | None = None,
+        reason_tags: Iterable[str] = (),
+        note: str = "",
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        actor_id, actor_role = self._actor(actor)
+        if actor_role not in {
+            "content_editor",
+            "art_director",
+            "producer",
+            "system_admin",
+        }:
+            raise WorkflowError(
+                "QC_CALIBRATION_ROLE_REQUIRED",
+                "只有内容编辑、美术指导、制片人或系统管理员可以标注 QC 样本。",
+                status=403,
+            )
+        human_decision = str(human_decision or "")
+        if human_decision not in {
+            "rejected",
+            "manual_review",
+            "candidate",
+            "recommended",
+        }:
+            raise WorkflowError(
+                "INVALID_QC_CALIBRATION_DECISION",
+                "人工标注结论无效。",
+            )
+        scores = human_scores if isinstance(human_scores, dict) else {}
+        normalized_scores: dict[str, int] = {}
+        for field, value in scores.items():
+            if field not in {
+                "safety",
+                "technical_integrity",
+                "poem_relevance",
+                "style_match",
+                "historical_plausibility",
+                "composition",
+                "character_quality",
+                "series_consistency",
+            }:
+                raise WorkflowError(
+                    "INVALID_QC_CALIBRATION_SCORE",
+                    f"不支持的人工评分维度：{field}",
+                )
+            try:
+                score = int(value)
+            except (TypeError, ValueError) as exc:
+                raise WorkflowError(
+                    "INVALID_QC_CALIBRATION_SCORE",
+                    f"人工评分 {field} 必须是 0–100。",
+                ) from exc
+            if not 0 <= score <= 100:
+                raise WorkflowError(
+                    "INVALID_QC_CALIBRATION_SCORE",
+                    f"人工评分 {field} 必须是 0–100。",
+                )
+            normalized_scores[field] = score
+        tags = list(
+            dict.fromkeys(
+                str(tag).strip()[:40]
+                for tag in reason_tags
+                if str(tag).strip()
+            )
+        )[:8]
+        calibration_id = _new_id("qccal")
+        now = utc_now()
+        with self.lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                image = connection.execute(
+                    "SELECT * FROM production_images WHERE id = ?",
+                    (image_id,),
+                ).fetchone()
+                if not image:
+                    raise WorkflowError(
+                        "IMAGE_NOT_FOUND", "生产候选不存在。", status=404
+                    )
+                qc = connection.execute(
+                    """
+                    SELECT * FROM qc_results
+                    WHERE image_id = ? ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (image_id,),
+                ).fetchone()
+                if not qc:
+                    raise WorkflowError(
+                        "QC_RESULT_REQUIRED",
+                        "该候选没有可标注的 QC 结果。",
+                        status=409,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO qc_calibration_samples(
+                        id, project_id, image_id, qc_result_id,
+                        predicted_decision, human_decision,
+                        human_scores_json, reason_tags_json, note,
+                        actor_id, actor_role, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        calibration_id,
+                        image["project_id"],
+                        image_id,
+                        qc["id"],
+                        qc["decision"],
+                        human_decision,
+                        _json(normalized_scores),
+                        _json(tags),
+                        str(note or "").strip()[:1000],
+                        actor_id,
+                        actor_role,
+                        now,
+                    ),
+                )
+                self._audit(
+                    connection,
+                    actor=actor,
+                    action="qc.calibration_recorded",
+                    target_type="qc_result",
+                    target_id=qc["id"],
+                    after={
+                        "calibration_id": calibration_id,
+                        "image_id": image_id,
+                        "predicted_decision": qc["decision"],
+                        "human_decision": human_decision,
+                        "reason_tags": tags,
+                    },
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return {
+            "id": calibration_id,
+            "image_id": image_id,
+            "qc_result_id": qc["id"],
+            "predicted_decision": qc["decision"],
+            "human_decision": human_decision,
+            "human_scores": normalized_scores,
+            "reason_tags": tags,
+            "note": str(note or "").strip()[:1000],
+            "actor_id": actor_id,
+            "actor_role": actor_role,
+            "created_at": now,
+        }
+
+    def qc_calibration_report(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> dict[str, Any]:
+        self.project(project_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.*, q.scores_json, q.policy_version_id,
+                       i.poem_id, p.title AS poem_title
+                FROM qc_calibration_samples c
+                JOIN qc_results q ON q.id = c.qc_result_id
+                JOIN production_images i ON i.id = c.image_id
+                JOIN poems p ON p.id = i.poem_id
+                WHERE c.project_id = ?
+                ORDER BY c.created_at DESC
+                LIMIT 1000
+                """,
+                (project_id,),
+            ).fetchall()
+        matrix: dict[str, dict[str, int]] = {}
+        false_pass = false_reject = 0
+        score_deltas: dict[str, list[float]] = {}
+        items: list[dict[str, Any]] = []
+        good = {"candidate", "recommended"}
+        for row in rows:
+            item = dict(row)
+            predicted = item["predicted_decision"]
+            human = item["human_decision"]
+            matrix.setdefault(predicted, {})[human] = (
+                matrix.setdefault(predicted, {}).get(human, 0) + 1
+            )
+            if predicted in good and human == "rejected":
+                false_pass += 1
+            if predicted == "rejected" and human in good:
+                false_reject += 1
+            model_scores = _decode(item.pop("scores_json", None), {})
+            human_scores = _decode(item.pop("human_scores_json", None), {})
+            for field, human_score in human_scores.items():
+                if field in model_scores:
+                    score_deltas.setdefault(field, []).append(
+                        abs(float(model_scores[field]) - float(human_score))
+                    )
+            item["model_scores"] = model_scores
+            item["human_scores"] = human_scores
+            item["reason_tags"] = _decode(item.pop("reason_tags_json", None), [])
+            items.append(item)
+        count = len(items)
+        return {
+            "project_id": project_id,
+            "sample_count": count,
+            "target_count": 100,
+            "remaining_count": max(0, 100 - count),
+            "ready_for_threshold_calibration": count >= 100,
+            "false_pass_count": false_pass,
+            "false_pass_rate": round(false_pass / count, 4) if count else None,
+            "false_reject_count": false_reject,
+            "false_reject_rate": round(false_reject / count, 4) if count else None,
+            "decision_matrix": matrix,
+            "dimension_mae": {
+                field: round(sum(values) / len(values), 2)
+                for field, values in score_deltas.items()
+                if values
+            },
+            "items": items[:100],
+        }
 
     def art_bible_versions(
         self,
@@ -4919,10 +5342,13 @@ class SopStore:
                     qc_status = "hard_fail"
                 if qc_status == "hard_fail" or hard_failures:
                     image_status = "qc_blocked"
+                    qc_decision = "rejected"
                 elif qc_status == "manual_required":
                     image_status = "needs_manual_qc"
+                    qc_decision = "manual_review"
                 else:
                     image_status = "review_ready"
+                    qc_decision = str(inspection.get("decision") or "candidate")
                 parent_image_id = image.get("parent_image_id")
                 parent = (
                     connection.execute(
@@ -4988,8 +5414,12 @@ class SopStore:
                     INSERT INTO qc_results(
                         id, image_id, version, status, score,
                         hard_failures_json, warnings_json, checks_json,
-                        coverage_json, duplicate_of, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        coverage_json, duplicate_of, policy_version_id,
+                        scores_json, problems_json, evidence_json, decision,
+                        confidence, reviewer_kind, reviewer_model, input_hash,
+                        usage_json, estimated_cost, raw_visual_score, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         qc_id,
@@ -5002,6 +5432,22 @@ class SopStore:
                         _json(inspection.get("checks") or {}),
                         _json(inspection.get("coverage") or []),
                         duplicate_of,
+                        str(inspection.get("policy_version_id") or ""),
+                        _json(inspection.get("scores") or {}),
+                        _json(inspection.get("problems") or []),
+                        _json(inspection.get("evidence") or {}),
+                        qc_decision,
+                        max(0, min(float(inspection.get("confidence") or 0), 1)),
+                        str(inspection.get("reviewer_kind") or "unavailable"),
+                        str(inspection.get("reviewer_model") or ""),
+                        str(inspection.get("input_hash") or ""),
+                        _json(inspection.get("usage") or {}),
+                        max(0, float(inspection.get("estimated_cost") or 0)),
+                        (
+                            float(inspection["raw_visual_score"])
+                            if inspection.get("raw_visual_score") is not None
+                            else None
+                        ),
                         now,
                     ),
                 )
@@ -5016,6 +5462,10 @@ class SopStore:
                         "qc_result_id": qc_id,
                         "qc_status": qc_status,
                         "duplicate_of": duplicate_of,
+                        "decision": qc_decision,
+                        "reviewer_kind": str(
+                            inspection.get("reviewer_kind") or "unavailable"
+                        ),
                     },
                 )
                 connection.execute("COMMIT")
@@ -5126,9 +5576,22 @@ class SopStore:
                     f"""
                     SELECT i.id FROM production_images i
                     JOIN generation_batches b ON b.id = i.batch_id
+                    LEFT JOIN qc_results q ON q.id = (
+                      SELECT q2.id FROM qc_results q2
+                      WHERE q2.image_id = i.id
+                      ORDER BY q2.created_at DESC, q2.id DESC LIMIT 1
+                    )
                     WHERE i.project_id = ? AND i.status IN ({placeholders})
                       AND b.purpose != 'style_benchmark'
-                    ORDER BY i.poem_id, i.created_at DESC
+                    ORDER BY i.poem_id,
+                      CASE q.decision
+                        WHEN 'recommended' THEN 0
+                        WHEN 'candidate' THEN 1
+                        WHEN 'manual_review' THEN 2
+                        ELSE 3
+                      END,
+                      q.score DESC,
+                      i.created_at DESC
                     LIMIT 1000
                     """,
                     [project_id, *statuses],
@@ -5165,6 +5628,16 @@ class SopStore:
                 ),
                 "qc_blocked": sum(
                     image["status"] in {"qc_blocked", "needs_manual_qc"}
+                    for image in images
+                ),
+                "qc_hard_blocked": sum(
+                    image["status"] == "qc_blocked" for image in images
+                ),
+                "needs_manual_qc": sum(
+                    image["status"] == "needs_manual_qc" for image in images
+                ),
+                "recommended": sum(
+                    (image.get("qc") or {}).get("decision") == "recommended"
                     for image in images
                 ),
             },
@@ -5291,7 +5764,14 @@ class SopStore:
                 ).fetchone()
                 if not qc:
                     raise WorkflowError("QC_RESULT_NOT_FOUND", "候选没有可覆盖的 QC 结果。", status=409)
-                next_status = "review_ready" if decision == "pass" else "qc_blocked"
+                next_status = (
+                    image["status"]
+                    if decision == "pass"
+                    and image["status"] in {"selected", "final_candidate", "finalized"}
+                    else "review_ready"
+                    if decision == "pass"
+                    else "qc_blocked"
+                )
                 connection.execute(
                     """
                     INSERT INTO qc_overrides(
@@ -5750,18 +6230,44 @@ class SopStore:
                             "终审候选缺少 QC 结果。",
                             status=409,
                         )
+                    override = connection.execute(
+                        """
+                        SELECT * FROM qc_overrides
+                        WHERE image_id = ? ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (image_id,),
+                    ).fetchone()
                     if _decode(qc["hard_failures_json"], []):
-                        override = connection.execute(
-                            """
-                            SELECT * FROM qc_overrides
-                            WHERE image_id = ? ORDER BY created_at DESC LIMIT 1
-                            """,
-                            (image_id,),
-                        ).fetchone()
                         if not override or override["decision"] != "pass":
                             raise WorkflowError(
                                 "QC_BLOCKS_FINALIZATION",
                                 "候选仍有未覆盖的 QC 硬失败。",
+                                status=409,
+                            )
+                    qc_scores = _decode(qc["scores_json"], {})
+                    historical_score = qc_scores.get("historical_plausibility")
+                    if qc["policy_version_id"] and historical_score is not None:
+                        policy_row = connection.execute(
+                            "SELECT content_json FROM qc_policy_versions WHERE id = ?",
+                            (qc["policy_version_id"],),
+                        ).fetchone()
+                        policy = (
+                            _decode(policy_row["content_json"], {})
+                            if policy_row
+                            else {}
+                        )
+                        minimum = int(
+                            (policy.get("thresholds") or {}).get(
+                                "historical_export_minimum", 60
+                            )
+                        )
+                        if (
+                            float(historical_score) < minimum
+                            and (not override or override["decision"] != "pass")
+                        ):
+                            raise WorkflowError(
+                                "HISTORICAL_QC_BLOCKS_FINALIZATION",
+                                f"历史合理性评分 {historical_score} 低于交付门槛 {minimum}，需内容复核并记录 QC 覆盖。",
                                 status=409,
                             )
                     file_errors = self._asset_file_errors(image)
@@ -5953,7 +6459,15 @@ class SopStore:
                    r.content_json AS requirement_json,
                    q.version AS qc_version, q.status AS qc_status,
                    q.score AS qc_score, q.hard_failures_json,
-                   q.warnings_json, ca.actor_id AS content_approved_by,
+                   q.warnings_json, q.policy_version_id AS qc_policy_version_id,
+                   q.scores_json AS qc_scores_json,
+                   q.problems_json AS qc_problems_json,
+                   q.decision AS qc_decision,
+                   q.confidence AS qc_confidence,
+                   q.reviewer_kind AS qc_reviewer_kind,
+                   q.reviewer_model AS qc_reviewer_model,
+                   q.input_hash AS qc_input_hash,
+                   ca.actor_id AS content_approved_by,
                    ca.created_at AS content_approved_at,
                    aa.actor_id AS art_approved_by,
                    aa.created_at AS art_approved_at
@@ -6026,6 +6540,14 @@ class SopStore:
                 "version": row["qc_version"],
                 "status": row["qc_status"],
                 "score": row["qc_score"],
+                "decision": row["qc_decision"],
+                "confidence": row["qc_confidence"],
+                "policy_version_id": row["qc_policy_version_id"],
+                "reviewer_kind": row["qc_reviewer_kind"],
+                "reviewer_model": row["qc_reviewer_model"],
+                "input_hash": row["qc_input_hash"],
+                "scores": _decode(row["qc_scores_json"], {}),
+                "problems": _decode(row["qc_problems_json"], []),
                 "hard_failures": _decode(row["hard_failures_json"], []),
                 "warnings": _decode(row["warnings_json"], []),
             },
@@ -7346,9 +7868,13 @@ class SopStore:
             "style_packs": self.style_pack_versions(project_id),
             "style_benchmark_poems": self.benchmark_poems(project_id),
             "style_benchmark_runs": self.style_benchmark_runs(project_id),
+            "qc_policy": self.published_qc_policy(project_id),
+            "qc_policy_versions": self.qc_policy_versions(project_id),
+            "qc_calibration": self.qc_calibration_report(project_id),
             "style_contracts": {
                 "art_bible_schema_version": ART_BIBLE_SCHEMA_VERSION,
                 "style_pack_schema_version": STYLE_PACK_SCHEMA_VERSION,
+                "qc_policy_schema_version": QC_POLICY_SCHEMA_VERSION,
             },
             "batches": self.batches(project_id),
             "tasks": self.tasks(project_id=project_id, limit=300),
@@ -7366,6 +7892,7 @@ class SopStore:
                 "art_bible_statuses": sorted(ART_BIBLE_STATUSES),
                 "style_pack_statuses": sorted(STYLE_PACK_STATUSES),
                 "style_benchmark_statuses": sorted(STYLE_BENCHMARK_STATUSES),
+                "qc_policy_statuses": sorted(QC_POLICY_STATUSES),
                 "batch_statuses": sorted(BATCH_STATUSES),
                 "task_statuses": sorted(TASK_STATUSES),
                 "production_image_statuses": sorted(PRODUCTION_IMAGE_STATUSES),

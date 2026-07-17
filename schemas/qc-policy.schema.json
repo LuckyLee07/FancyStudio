@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tang-poem-studio.local/schemas/qc-policy-v1.json",
+  "title": "QCPolicy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "semantic_version",
+    "name",
+    "release_notes",
+    "weights",
+    "thresholds",
+    "hard_fail_problem_codes"
+  ],
+  "properties": {
+    "semantic_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "name": {"type": "string", "minLength": 2, "maxLength": 100},
+    "release_notes": {"type": "string", "minLength": 2, "maxLength": 500},
+    "weights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safety",
+        "technical_integrity",
+        "poem_relevance",
+        "style_match",
+        "historical_plausibility",
+        "composition",
+        "character_quality",
+        "series_consistency"
+      ],
+      "properties": {
+        "safety": {"type": "number", "minimum": 0, "maximum": 1},
+        "technical_integrity": {"type": "number", "minimum": 0, "maximum": 1},
+        "poem_relevance": {"type": "number", "minimum": 0, "maximum": 1},
+        "style_match": {"type": "number", "minimum": 0, "maximum": 1},
+        "historical_plausibility": {"type": "number", "minimum": 0, "maximum": 1},
+        "composition": {"type": "number", "minimum": 0, "maximum": 1},
+        "character_quality": {"type": "number", "minimum": 0, "maximum": 1},
+        "series_consistency": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reject_below",
+        "manual_review_below",
+        "recommended_from",
+        "poem_relevance_hard_fail_below",
+        "historical_hard_fail_below",
+        "historical_export_minimum",
+        "confidence_manual_review_below"
+      ],
+      "properties": {
+        "reject_below": {"type": "integer", "minimum": 0, "maximum": 100},
+        "manual_review_below": {"type": "integer", "minimum": 0, "maximum": 100},
+        "recommended_from": {"type": "integer", "minimum": 0, "maximum": 100},
+        "poem_relevance_hard_fail_below": {"type": "integer", "minimum": 0, "maximum": 100},
+        "historical_hard_fail_below": {"type": "integer", "minimum": 0, "maximum": 100},
+        "historical_export_minimum": {"type": "integer", "minimum": 0, "maximum": 100},
+        "confidence_manual_review_below": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "hard_fail_problem_codes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "items": {"type": "string", "pattern": "^[A-Z0-9_]{2,80}$"}
+    }
+  }
+}

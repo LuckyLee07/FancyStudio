@@ -14,7 +14,7 @@ class QcEngineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = inspect_image(path, "portrait")
-        self.assertEqual(result["status"], "soft_risk")
+        self.assertEqual(result["status"], "manual_required")
         self.assertEqual(result["width"], 1024)
         self.assertEqual(result["height"], 1536)
         self.assertTrue(result["checks"]["aspect_ratio_match"])

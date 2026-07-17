@@ -148,6 +148,24 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("style-gate-note", styles)
         self.assertIn("benchmark-poem-option", styles)
 
+    def test_visual_qc_scores_evidence_and_calibration_are_visible(self):
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        for field in (
+            "poem_relevance",
+            "style_match",
+            "historical_plausibility",
+            "composition",
+            "series_consistency",
+        ):
+            self.assertIn(field, script)
+        self.assertIn("VISUAL QC POLICY", script)
+        self.assertIn("qc.evidence", script)
+        self.assertIn("data-qc-calibration", script)
+        self.assertIn("submitQcCalibration", script)
+        self.assertIn("qc-score-grid", styles)
+        self.assertIn("qc-calibration-panel", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

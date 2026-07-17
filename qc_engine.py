@@ -19,7 +19,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 
-QC_VERSION = "local-rules-v1"
+QC_VERSION = "local-rules-v2"
 EXPECTED_RATIOS = {"portrait": 2 / 3, "square": 1.0, "landscape": 3 / 2}
 
 
@@ -315,7 +315,10 @@ def _result(
 ) -> dict[str, Any]:
     unique_failures = list(dict.fromkeys(hard_failures))
     unique_warnings = list(dict.fromkeys(warnings))
-    status = "hard_fail" if unique_failures else ("soft_risk" if unique_warnings else "pass")
+    # Local checks cannot prove poem relevance, historical plausibility or
+    # aesthetic quality. A technically valid file therefore still requires a
+    # visual reviewer (or an explicit human override) before candidate routing.
+    status = "hard_fail" if unique_failures else "manual_required"
     score = max(0, 100 - len(unique_failures) * 35 - len(unique_warnings) * 5)
     return {
         "version": QC_VERSION,

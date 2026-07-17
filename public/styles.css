@@ -2658,6 +2658,66 @@ input[type="checkbox"] {
   font-size: 9px;
 }
 
+.qc-policy-title {
+  display: flex;
+  margin-top: 17px;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.qc-policy-title h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.qc-policy-title small {
+  display: block;
+  margin-top: 4px;
+  color: var(--faint);
+  font-family: ui-monospace, monospace;
+  font-size: 8px;
+}
+
+.qc-threshold-grid {
+  display: grid;
+  margin-top: 13px;
+  gap: 7px;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.qc-threshold-grid span {
+  display: grid;
+  padding: 8px;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.qc-threshold-grid small,
+.qc-calibration-progress small,
+.qc-calibration-progress span {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.qc-threshold-grid strong {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.qc-calibration-progress {
+  display: grid;
+  margin-top: 13px;
+  gap: 7px;
+}
+
+.qc-calibration-progress > div:first-child {
+  display: flex;
+  justify-content: space-between;
+}
+
 .budget-panel h3 {
   margin: 0;
 }
@@ -3855,6 +3915,99 @@ input[type="checkbox"] {
 
 .qc-detail li.is-danger {
   color: var(--red);
+}
+
+.qc-score-grid {
+  display: grid !important;
+  margin-top: 11px;
+  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.qc-score-grid article {
+  display: flex;
+  padding: 7px 8px;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.025);
+  border-radius: 6px;
+}
+
+.qc-score-grid small {
+  color: var(--faint);
+  font-size: 7px;
+}
+
+.qc-score-grid strong {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.qc-problem-list {
+  display: grid !important;
+  margin-top: 10px;
+  gap: 6px;
+}
+
+.qc-problem-list article {
+  padding: 9px;
+  background: rgba(243, 191, 79, 0.055);
+  border-left: 2px solid var(--yellow);
+  border-radius: 5px;
+}
+
+.qc-problem-list article.severity-critical,
+.qc-problem-list article.severity-high {
+  background: rgba(236, 91, 102, 0.055);
+  border-left-color: var(--red);
+}
+
+.qc-problem-list article > div {
+  display: flex;
+  justify-content: space-between;
+}
+
+.qc-problem-list article p,
+.qc-problem-list article small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.qc-evidence {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.qc-calibration-panel {
+  display: grid;
+  margin-top: 12px;
+  padding: 12px;
+  gap: 10px;
+  background: rgba(109, 151, 218, 0.04);
+  border: 1px solid rgba(109, 151, 218, 0.16);
+  border-radius: 8px;
+}
+
+.qc-calibration-panel > div:first-child {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 9px;
+}
+
+.qc-calibration-panel > div:first-child span {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.qc-calibration-panel > div:last-child {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .review-decision-form {

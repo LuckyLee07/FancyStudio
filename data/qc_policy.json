@@ -1,0 +1,33 @@
+[
+  {
+    "semantic_version": "1.0.0",
+    "name": "唐诗插图自动质检政策 v1",
+    "release_notes": "建立技术、诗意、风格、历史、构图、人物与系列一致性的分层门禁。",
+    "weights": {
+      "safety": 0.05,
+      "technical_integrity": 0.1,
+      "poem_relevance": 0.3,
+      "style_match": 0.2,
+      "historical_plausibility": 0.1,
+      "composition": 0.15,
+      "character_quality": 0.05,
+      "series_consistency": 0.05
+    },
+    "thresholds": {
+      "reject_below": 60,
+      "manual_review_below": 75,
+      "recommended_from": 85,
+      "poem_relevance_hard_fail_below": 35,
+      "historical_hard_fail_below": 30,
+      "historical_export_minimum": 60,
+      "confidence_manual_review_below": 0.65
+    },
+    "hard_fail_problem_codes": [
+      "UNSAFE_CONTENT",
+      "UNEXPECTED_TEXT",
+      "WATERMARK_OR_LOGO",
+      "OBVIOUS_MODERN_OBJECT",
+      "SEVERE_CHARACTER_DEFORMITY"
+    ]
+  }
+]

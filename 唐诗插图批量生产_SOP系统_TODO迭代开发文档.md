@@ -1,9 +1,9 @@
 # 唐诗插图批量生产 SOP 系统｜TODO 迭代开发文档
 
-> 文档版本：v1.5
+> 文档版本：v1.6
 > 编写日期：2026-07-18
 > 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档
-> 当前代码基线：本地实施版 `v0.11.0`
+> 当前代码基线：本地实施版 `v0.12.0`
 > 文档状态：持续迭代中；以任务状态和自动化测试为准
 
 ---
@@ -480,9 +480,9 @@ flowchart LR
 - [x] P0 支持硬失败、软风险和分数三种输出；
 - [x] P0 硬失败图片默认不进入人审，但可在异常中心查看和恢复；
 - [x] P0 质检不可用时任务进入 `NeedsManualQC`，不得伪装为通过；
-- [ ] P0 用至少 100 张人工标注图校准阈值；
+- [-] P0 用至少 100 张人工标注图校准阈值；标注、误放 / 误杀矩阵和维度 MAE 工作流已完成，真实样本仍为 0 / 100；
 - [x] P0 保留人工覆盖自动结果的能力和原因；
-- [ ] P1 增加同诗候选的多样性排序；
+- [-] P1 增加同诗候选的多样性排序；当前已按推荐等级和综合分排序，视觉多样性向量仍未接入；
 - [ ] P1 增加跨诗构图重复检测；
 - [ ] P1 每周抽样统计误杀率和漏检率。
 
@@ -493,6 +493,8 @@ flowchart LR
 - 人工覆盖 QC 后不修改原结果，仅新增覆盖记录；
 - 可从 QC 结果定位所用模型、规则、版本和阈值；
 - 质检故障不阻塞图片入库，但必须阻止其自动进入正常候选池。
+
+**v0.12.0 验收证据：** `schemas/review-result.schema.json`、`schemas/qc-policy.schema.json`、`review_schema.py`、`visual_reviewer.py`、`data/qc_policy.json`、SQLite QCPolicy / Calibration Migration、八维审片 UI、人工校准入口、历史合理性交付门槛，以及 `tests/test_review_schema.py`、`tests/test_visual_reviewer.py` 和批量 API 端到端回归。真实视觉审查采用严格结构化输出；接口关闭、未配置、拒绝或故障时统一降级为 `NeedsManualQC`。Demo 分数明确标记为 synthetic，仅验证流程。
 
 ---
 
@@ -608,8 +610,12 @@ flowchart LR
 
 ### 10.4 质检、评审和交付
 
+- [x] `GET /api/schemas/review-result` 与 `GET /api/schemas/qc-policy`：读取当前视觉质检合同；
+- [x] `GET /api/qc-policies`：读取项目 QC 政策版本；
+- [x] `GET /api/qc-calibration`：读取人工标注进度、误放 / 误杀矩阵与维度误差；
 - [x] `GET /api/review-queue`：返回按诗分组的人审候选；
 - [x] `POST /api/images/:id/decision`：收藏、淘汰、入选；
+- [x] `POST /api/images/:id/qc-calibration`：新增人工校准样本且不改写自动结果；
 - [x] `POST /api/images/:id/rework`：创建结构化返工任务；
 - [x] `POST /api/images/:id/finalize`：锁定为 FinalAsset；
 - [x] `POST /api/exports/estimate`：导出前检查；
@@ -639,7 +645,7 @@ flowchart LR
 - [ ] PM 锁定首批 20 首试生产名单和 12 首基准诗；
 - [ ] PM 定义 P0 非目标，评审后冻结；
 - [ ] BE 定义数据库 ERD 和状态迁移表；
-- [ ] AI 定义 Requirement、Direction、QC 三个 JSON Schema；
+- [x] AI 定义 Requirement、Direction、QC 三个 JSON Schema；
 - [ ] PD 定义工作台导航、看板卡片和批量操作规范；
 - [ ] QA 编写端到端验收用例初稿；
 - [ ] 团队创建风险台账和决策日志。
@@ -717,12 +723,12 @@ flowchart LR
 
 **目标：自动挡掉明显废图，并将返工变成结构化任务。**
 
-- [-] AI / BE 实现 L0-L2 质检和近重复检测；
-- [ ] AI 定义历史与美术质检 Prompt、Schema 和版本；
+- [x] AI / BE 实现 L0-L2 质检和近重复检测；
+- [x] AI 定义历史与美术质检 Prompt、Schema 和版本；
 - [x] BE 实现 QCResult、Candidate Router 和人工覆盖；
 - [x] FE 实现审片台网格、大图、A/B 对比和快捷键；
 - [x] FE 实现结构化返工单和衍生谱系；
-- [ ] AD 标注至少 100 张 QC 校准样本；
+- [-] AD 标注至少 100 张 QC 校准样本；系统入口和统计已完成，真实标注仍为 0 / 100；
 - [ ] AD 完成 20 首首轮审片并记录决策标签；
 - [ ] QA 验证快捷键误触、连续操作、刷新恢复和并发更新；
 - [ ] QA 统计质检误杀、漏检和重复图拦截表现。
@@ -845,12 +851,12 @@ flowchart LR
 
 - [x] E04-T01 技术 QC；
 - [x] E04-T02 近重复检测；
-- [-] E04-T03 语义 / 历史 / 美术 QC；
+- [x] E04-T03 语义 / 历史 / 美术 QC；
 - [x] E04-T04 QC 版本和阈值；
 - [x] E04-T05 硬失败隔离；
-- [ ] E04-T06 候选排序和多样性；
+- [-] E04-T06 候选排序和多样性；已按政策结论和分数排序，视觉多样性待实现；
 - [x] E04-T07 人工覆盖；
-- [ ] E04-T08 100 张标注集与阈值校准。
+- [-] E04-T08 100 张标注集与阈值校准；标注与报表能力已完成，待真实样本。
 
 **验收：** QC 结果可解释、可覆盖、可追溯，故障时不误标为通过。
 
@@ -1025,7 +1031,7 @@ flowchart LR
 2. [ ] PM / AD / CE：拿 3 首诗线下走一遍目标 SOP，补齐门禁；
 3. [ ] PM / PD：完成 8 个一级页面低保真原型；
 4. [ ] BE：输出 SQLite ERD、状态迁移表和旧数据迁移方案；
-5. [-] AI：Requirement、Direction Schema 已提交；QC 仍需补齐语义、历史和美术层合同；
+5. [x] AI：Requirement、Direction、ReviewResult 与 QCPolicy Schema 均已提交；
 6. [x] AD：提交结构化 Art Bible v1 和 6 个风格包模板；真实参考四宫格仍作为 EPIC-02B 后续项；
 7. [ ] CE：提交 300 首诗词导入模板和数据质量报告；
 8. [ ] QA：把第 13.2 节转成可执行验收用例；
@@ -1045,6 +1051,8 @@ flowchart LR
 | `data/art_bible.json` | 作为 ArtBibleVersion 初始数据，运行时以 SQLite 发布版本为准 |
 | `data/benchmark_poems.json` | 作为固定风格验证集，保留误读与历史风险标签 |
 | `style_schema.py` | 保持 Art Bible / StylePack 运行时合同与 JSON Schema 一致 |
+| `review_schema.py` | 保持 ReviewResult / QCPolicy 运行时合同、确定性权重与阈值一致 |
+| `visual_reviewer.py` | 隔离多模态 Provider 请求、结构化输出与人工 QC 安全降级 |
 | `public/index.html` | 重构为后台工作台 Shell 与 8 个一级页面容器 |
 | `public/app.js` | 按页面与领域拆分；统一 API Client、Store、Router 和批量选择 |
 | `public/styles.css` | 保留设计 Token，重做高信息密度看板、表格、侧栏和审片布局 |

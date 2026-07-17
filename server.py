@@ -31,11 +31,17 @@ from urllib.parse import parse_qs, urlparse
 from backup_service import create_backup, list_backups, verify_backup
 from direction_schema import schema_document as direction_schema_document
 from qc_engine import QC_VERSION, inspect_image
+from review_schema import (
+    compose_qc_result,
+    qc_policy_schema_document,
+    review_result_schema_document,
+)
 from requirement_schema import schema_document as requirement_schema_document
 from style_schema import (
     art_bible_schema_document,
     style_pack_schema_document,
 )
+from visual_reviewer import review_image, visual_reviewer_status
 from sop_store import (
     DEFAULT_PROJECT_ID as SOP_DEFAULT_PROJECT_ID,
     SopStore,
@@ -50,7 +56,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -368,6 +374,7 @@ def provider_runtime_status() -> dict[str, Any]:
         },
         "max_attempts": 3,
         "circuit": circuit,
+        "visual_qc": visual_reviewer_status(provider),
         "capabilities": {
             "generation": provider in {"demo", "openai"},
             "image_edit": provider == "openai",
@@ -974,17 +981,16 @@ def register_image_qc(
     task: dict[str, Any],
 ) -> dict[str, Any]:
     try:
-        inspection = inspect_image(
-            local_image_path(record),
-            task["aspect_ratio"],
-        )
+        path = local_image_path(record)
+        local_inspection = inspect_image(path, task["aspect_ratio"])
     except Exception as exc:
-        inspection = {
+        path = None
+        local_inspection = {
             "version": QC_VERSION,
             "status": "manual_required",
             "score": 0,
             "hard_failures": [],
-            "warnings": [f"qc_engine_unavailable: {exc}"],
+            "warnings": ["qc_engine_unavailable"],
             "checks": {"inspection_completed": False},
             "coverage": [],
             "file_path": "",
@@ -995,6 +1001,58 @@ def register_image_qc(
             "width": 0,
             "height": 0,
         }
+        structured_log(
+            "qc.local_inspection_unavailable",
+            level="warning",
+            task_id=task.get("id"),
+            error_type=type(exc).__name__,
+        )
+    policy_record = store.published_qc_policy(
+        str(task.get("project_id") or SOP_DEFAULT_PROJECT_ID)
+    )
+    prompt = task.get("prompt") if isinstance(task.get("prompt"), dict) else {}
+    direction = prompt.get("direction") or {}
+    context = {
+        "poem": prompt.get("poem") or {},
+        "requirement": (prompt.get("requirement") or {}).get("content") or {},
+        "direction": {
+            "type": direction.get("type"),
+            **(direction.get("content") or {}),
+        },
+        "style": prompt.get("style") or {},
+    }
+    if local_inspection.get("hard_failures") or path is None:
+        visual_result = None
+        reviewer_metadata = {
+            "reviewer_kind": "skipped",
+            "unavailable_code": (
+                "visual_review_skipped_local_hard_fail"
+                if local_inspection.get("hard_failures")
+                else "visual_review_skipped_local_inspection_unavailable"
+            ),
+        }
+    else:
+        visual_result, reviewer_metadata = review_image(
+            path,
+            image_provider=str(task.get("provider") or "demo"),
+            context=context,
+            policy_version_id=policy_record["id"],
+        )
+    inspection = compose_qc_result(
+        local_inspection,
+        visual_result,
+        policy_record["content"],
+        policy_version_id=policy_record["id"],
+        reviewer_metadata=reviewer_metadata,
+    )
+    if visual_result is None and not local_inspection.get("hard_failures"):
+        structured_log(
+            "qc.visual_review_unavailable",
+            level="warning",
+            task_id=task.get("id"),
+            provider=task.get("provider"),
+            reason=reviewer_metadata.get("unavailable_code"),
+        )
     production_image = store.register_production_image(record, task, inspection)
     qc = production_image.get("qc") or {}
     if STORE is not None:
@@ -1548,6 +1606,22 @@ class StudioHandler(BaseHTTPRequestHandler):
         if path == "/api/schemas/direction-proposal":
             self._send_json(direction_schema_document())
             return
+        if path == "/api/schemas/review-result":
+            self._send_json(review_result_schema_document())
+            return
+        if path == "/api/schemas/qc-policy":
+            self._send_json(qc_policy_schema_document())
+            return
+        if path == "/api/qc-policies":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(
+                {"items": get_sop_store().qc_policy_versions(project_id)}
+            )
+            return
+        if path == "/api/qc-calibration":
+            project_id = query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0]
+            self._send_json(get_sop_store().qc_calibration_report(project_id))
+            return
         if path == "/api/requirement-generation-runs":
             try:
                 unresolved = query.get("unresolved", [""])[0].lower()
@@ -1958,7 +2032,7 @@ class StudioHandler(BaseHTTPRequestHandler):
                 )
             return
         image_workflow_action = re.fullmatch(
-            r"/api/images/([a-f0-9]{32})/(decision|qc-override|rework|finalize)",
+            r"/api/images/([a-f0-9]{32})/(decision|qc-override|qc-calibration|rework|finalize)",
             path,
         )
         if image_workflow_action:
@@ -1988,6 +2062,25 @@ class StudioHandler(BaseHTTPRequestHandler):
                         actor=body.get("actor"),
                     )
                     self._send_json({"image": image})
+                elif action == "qc-calibration":
+                    human_scores = body.get("human_scores") or {}
+                    reason_tags = body.get("reason_tags") or []
+                    if not isinstance(human_scores, dict) or not isinstance(
+                        reason_tags, list
+                    ):
+                        raise WorkflowError(
+                            "INVALID_QC_CALIBRATION_PAYLOAD",
+                            "human_scores 必须是对象，reason_tags 必须是数组。",
+                        )
+                    sample = get_sop_store().record_qc_calibration(
+                        image_id,
+                        human_decision=str(body.get("human_decision") or ""),
+                        human_scores=human_scores,
+                        reason_tags=reason_tags,
+                        note=str(body.get("note") or ""),
+                        actor=body.get("actor"),
+                    )
+                    self._send_json({"sample": sample}, HTTPStatus.CREATED)
                 elif action == "rework":
                     preserve = body.get("preserve") or []
                     change = body.get("change") or []
