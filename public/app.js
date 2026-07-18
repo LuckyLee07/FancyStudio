@@ -29,6 +29,7 @@ const state = {
     qc_calibration: null,
     provider_status: null,
     production_report: { daily: [], anomalies: [], tasks: {} },
+    blockers: { items: [], total: 0, summary: {} },
     batches: [],
     tasks: [],
     budget: null,
@@ -62,6 +63,10 @@ const state = {
   queueBatchFilter: "",
   queueErrorFilter: "",
   queueTaskQuery: "",
+  currentBlockerKind: "",
+  blockerRoleFilter: "",
+  blockerSeverityFilter: "",
+  blockerQuery: "",
 };
 
 const roleLabels = {
@@ -71,6 +76,7 @@ const roleLabels = {
   ai_operator: "AI 操作员",
   system_admin: "系统管理员",
 };
+let blockerQueryTimer;
 const sourceTypeLabels = {
   public_domain: "公共领域",
   self_curated: "自有整理",
@@ -641,18 +647,140 @@ function renderProductionReport() {
 
   const anomalies = report.anomalies || [];
   document.querySelector("#anomaly-total").textContent = `${report.anomaly_count || 0} 项`;
+  document.querySelector("#open-all-blockers").disabled = !anomalies.length;
   document.querySelector("#anomaly-list").innerHTML = anomalies.length
     ? anomalies
         .map(
-          (item) => `<button class="anomaly-item severity-${item.severity}" type="button" data-anomaly-view="${item.view}" data-anomaly-filter="${item.filter}">
+          (item) => `<button class="anomaly-item severity-${item.severity}" type="button" data-open-blocker-kind="${item.id}">
             <span>${item.count}</span>
             <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(
               item.suggested_action,
-            )}</small></div><i>→</i>
+            )}</small><em>${escapeHtml(roleLabels[item.responsible_role] || item.responsible_role)}</em></div><i>→</i>
           </button>`,
         )
         .join("")
     : '<div class="empty-state compact"><strong>当前没有生产异常</strong><p>失败、阻塞、QC 隔离和预算停机会集中显示在这里。</p></div>';
+}
+
+const blockerSeverityLabels = {
+  critical: "紧急",
+  high: "高",
+  medium: "中",
+};
+
+function renderBlockerDialog() {
+  const payload = state.sop.blockers || { items: [], total: 0, summary: {} };
+  const items = payload.items || [];
+  const summary = payload.summary || {};
+  const activeDefinition = (state.sop.production_report?.anomalies || []).find(
+    (item) => item.id === state.currentBlockerKind,
+  );
+  document.querySelector("#blocker-dialog-title").textContent = activeDefinition
+    ? `${activeDefinition.label} · 逐条处置`
+    : "全部生产异常 · 逐条处置";
+  document.querySelector("#blocker-summary").innerHTML = [
+    ["当前结果", payload.total || 0],
+    ["紧急", summary.by_severity?.critical || 0],
+    ["高", summary.by_severity?.high || 0],
+    ["中", summary.by_severity?.medium || 0],
+  ]
+    .map(([label, value]) => `<span><small>${label}</small><strong>${value}</strong></span>`)
+    .join("");
+  document.querySelector("#blocker-list").innerHTML = items.length
+    ? items
+        .map(
+          (item) => `
+            <article class="blocker-record severity-${item.severity}">
+              <header>
+                <div>
+                  <span>${escapeHtml(item.label)} · ${escapeHtml(
+                    blockerSeverityLabels[item.severity] || item.severity,
+                  )}</span>
+                  <strong>${escapeHtml(item.poem_title || item.batch_name || item.target_id)}</strong>
+                </div>
+                <em>${escapeHtml(roleLabels[item.responsible_role] || item.responsible_role)}</em>
+              </header>
+              <div class="blocker-evidence">
+                <code>${escapeHtml(item.code)}</code>
+                <p>${escapeHtml(item.reason)}</p>
+              </div>
+              <div class="blocker-action-copy">
+                <span>建议动作</span>
+                <p>${escapeHtml(item.suggested_action)}</p>
+              </div>
+              <footer>
+                <small>${escapeHtml(item.target_type)} · ${formatDate(item.updated_at)}</small>
+                <div>
+                  ${
+                    item.poem_id
+                      ? `<button class="secondary-button" type="button" data-blocker-open-poem="${item.poem_id}">诗词详情</button>`
+                      : ""
+                  }
+                  <button class="primary-button" type="button" data-blocker-route="${escapeHtml(
+                    item.id,
+                  )}">前往处理</button>
+                </div>
+              </footer>
+            </article>`,
+        )
+        .join("")
+    : '<div class="empty-state compact"><strong>当前筛选下没有异常</strong><p>异常恢复后会自动从当前队列退出。</p></div>';
+}
+
+async function refreshBlockerDialog() {
+  const params = new URLSearchParams({
+    project_id: project().id,
+    limit: "100",
+  });
+  if (state.currentBlockerKind) params.set("kind", state.currentBlockerKind);
+  if (state.blockerRoleFilter) params.set("responsible_role", state.blockerRoleFilter);
+  if (state.blockerSeverityFilter) params.set("severity", state.blockerSeverityFilter);
+  if (state.blockerQuery) params.set("q", state.blockerQuery);
+  const payload = await api(`/api/exceptions?${params.toString()}`);
+  state.sop.blockers = payload;
+  renderBlockerDialog();
+}
+
+async function openBlockerDialog(kind = "") {
+  state.currentBlockerKind = kind;
+  state.blockerRoleFilter = "";
+  state.blockerSeverityFilter = "";
+  state.blockerQuery = "";
+  document.querySelector("#blocker-role-filter").value = "";
+  document.querySelector("#blocker-severity-filter").value = "";
+  document.querySelector("#blocker-query").value = "";
+  document.querySelector("#blocker-list").innerHTML =
+    '<div class="empty-state compact"><strong>正在读取异常证据</strong><p>从持久化任务、QC、批次与版本运行记录汇总。</p></div>';
+  document.querySelector("#blocker-dialog").showModal();
+  try {
+    await refreshBlockerDialog();
+  } catch (error) {
+    document.querySelector("#blocker-list").innerHTML = `<div class="empty-state compact"><strong>异常读取失败</strong><p>${escapeHtml(
+      error.message,
+    )}</p></div>`;
+  }
+}
+
+async function routeBlocker(item) {
+  const view = item.view;
+  const filter = item.filter || "";
+  if (view === "queue") {
+    state.queueTaskFilter = filter;
+    await refreshTaskPage({ offset: 0 });
+  } else if (view === "review") {
+    state.reviewShowBlocked = true;
+    document.querySelector("#review-show-blocked").checked = true;
+    renderReview();
+  } else if (view === "overview" && filter === "blocked") {
+    state.poemStatus = "blocked";
+    document.querySelector("#poem-status-filter").value = "blocked";
+    renderPoemTable();
+  } else if (view === "requirements" && filter === "failed") {
+    state.requirementFilter = "failed";
+    renderRequirements();
+  }
+  document.querySelector("#blocker-dialog").close();
+  switchView(view);
 }
 
 function nextAction(poem) {
@@ -2006,6 +2134,17 @@ async function openPoemDetail(poemId) {
         <div><span>${escapeHtml(poem.dynasty)} · ${escapeHtml(poem.author)} · ${escapeHtml(poem.theme || "未分类")}</span><h3>${escapeHtml(poem.title)}</h3><p>${(poem.lines || []).map(escapeHtml).join("<br>")}</p></div>
         <div>${statusBadge(poem.status)}<small>更新于 ${formatDate(poem.updated_at)}</small>${poem.blocked_reason ? `<strong class="error-code">${escapeHtml(poem.blocked_reason)}</strong>` : ""}</div>
       </section>
+      ${
+        poem.status === "blocked"
+          ? `<section class="poem-blocker-banner">
+              <div><span>${escapeHtml(poem.blocked_code || "WORKFLOW_BLOCKED")}</span><strong>${escapeHtml(
+                roleLabels[poem.blocked_role] || poem.blocked_role || "制片人",
+              )}负责</strong></div>
+              <p>${escapeHtml(poem.blocked_action || "查看生产证据链并进入对应工作台处理。")}</p>
+              <small>阻塞于 ${formatDate(poem.blocked_at || poem.updated_at)}</small>
+            </section>`
+          : ""
+      }
       <section class="poem-chain-metrics">
         ${[
           ["内容版本", counts.content_versions || 0],
@@ -4124,26 +4263,25 @@ document.addEventListener("click", (event) => {
     openStyleEvaluationDialog(evaluateStyleBenchmark.dataset.evaluateStyleBenchmark);
   }
 
-  const anomaly = event.target.closest("[data-anomaly-view]");
-  if (anomaly) {
-    const view = anomaly.dataset.anomalyView;
-    const filter = anomaly.dataset.anomalyFilter || "";
-    if (view === "queue") {
-      state.queueTaskFilter = filter;
-      refreshTaskPage({ offset: 0 });
-    } else if (view === "review") {
-      state.reviewShowBlocked = true;
-      document.querySelector("#review-show-blocked").checked = true;
-      renderReview();
-    } else if (view === "overview" && filter === "blocked") {
-      state.poemStatus = "blocked";
-      document.querySelector("#poem-status-filter").value = "blocked";
-      renderPoemTable();
-    } else if (view === "requirements" && filter === "failed") {
-      state.requirementFilter = "failed";
-      renderRequirements();
-    }
-    switchView(view);
+  const blockerGroup = event.target.closest("[data-open-blocker-kind]");
+  if (blockerGroup) {
+    openBlockerDialog(blockerGroup.dataset.openBlockerKind);
+  }
+  if (event.target.closest("#open-all-blockers")) {
+    openBlockerDialog();
+  }
+
+  const blockerRoute = event.target.closest("[data-blocker-route]");
+  if (blockerRoute) {
+    const item = (state.sop.blockers?.items || []).find(
+      (candidate) => candidate.id === blockerRoute.dataset.blockerRoute,
+    );
+    if (item) routeBlocker(item);
+  }
+  const blockerPoem = event.target.closest("[data-blocker-open-poem]");
+  if (blockerPoem) {
+    document.querySelector("#blocker-dialog").close();
+    openPoemDetail(blockerPoem.dataset.blockerOpenPoem);
   }
 
   if (event.target.closest("[data-clear-queue-filter]")) {
@@ -4298,6 +4436,21 @@ document.querySelector("#export-assets-button").addEventListener("click", export
 document.querySelector("#review-show-blocked").addEventListener("change", (event) => {
   state.reviewShowBlocked = event.target.checked;
   renderReview();
+});
+document.querySelector("#blocker-role-filter").addEventListener("change", (event) => {
+  state.blockerRoleFilter = event.target.value;
+  refreshBlockerDialog().catch((error) => showToast(error.message, "error"));
+});
+document.querySelector("#blocker-severity-filter").addEventListener("change", (event) => {
+  state.blockerSeverityFilter = event.target.value;
+  refreshBlockerDialog().catch((error) => showToast(error.message, "error"));
+});
+document.querySelector("#blocker-query").addEventListener("input", (event) => {
+  state.blockerQuery = event.target.value.trim();
+  clearTimeout(blockerQueryTimer);
+  blockerQueryTimer = setTimeout(() => {
+    refreshBlockerDialog().catch((error) => showToast(error.message, "error"));
+  }, 220);
 });
 document.querySelector("#asset-search").addEventListener("input", (event) => {
   state.assetQuery = event.target.value;

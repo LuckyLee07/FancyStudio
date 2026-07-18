@@ -417,6 +417,67 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertTrue(provider["capabilities"]["generation"])
         self.assertFalse(provider["capabilities"]["image_edit"])
 
+    def test_exception_center_api_returns_actionable_owned_items(self):
+        store = server.get_sop_store()
+        editor = {"id": "exception-editor", "role": "content_editor"}
+        art = {"id": "exception-art", "role": "art_director"}
+        producer = {"id": "exception-producer", "role": "producer"}
+        requirement_result = store.generate_requirements(
+            server.SOP_DEFAULT_PROJECT_ID, ["jiang-xue"], actor=editor
+        )
+        requirement_id = requirement_result["results"][0]["requirement_id"]
+        store.decide_requirement(requirement_id, "approve", actor=editor)
+        direction_result = store.generate_directions(
+            server.SOP_DEFAULT_PROJECT_ID, ["jiang-xue"], actor=art
+        )
+        direction_id = direction_result["results"][0]["direction_ids"][0]
+        store.decide_direction(direction_id, "approve", actor=art)
+        batch = store.create_batch(
+            server.SOP_DEFAULT_PROJECT_ID,
+            ["jiang-xue"],
+            direction_ids=[direction_id],
+            style_id="ink-whitespace",
+            aspect_ratio="portrait",
+            count_per_direction=1,
+            provider="demo",
+            model="demo-renderer",
+            unit_cost=0,
+            actor=producer,
+        )
+        store.start_batch(batch["id"], actor=producer)
+        task = store.claim_next_task(batch["id"])
+        store.fail_task(
+            task["id"],
+            task["attempt_id"],
+            error_code="INVALID_REQUEST",
+            error_message="测试参数错误 /Users/test/private.json sk-live-secret123",
+            retryable=False,
+            duration_ms=5,
+        )
+
+        query = urllib.parse.urlencode(
+            {
+                "kind": "failed_tasks",
+                "responsible_role": "ai_operator",
+                "q": "江雪",
+            }
+        )
+        status, payload = self.request_json(f"/api/exceptions?{query}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["items"][0]["target_id"], task["id"])
+        self.assertEqual(payload["items"][0]["responsible_role"], "ai_operator")
+        self.assertTrue(payload["items"][0]["suggested_action"])
+        self.assertNotIn("/Users/", payload["items"][0]["reason"])
+        self.assertNotIn("sk-live", payload["items"][0]["reason"])
+        self.assertIn("by_role", payload["summary"])
+
+        with self.assertRaises(urllib.error.HTTPError) as invalid:
+            self.request_json("/api/exceptions?kind=not-a-kind")
+        self.assertEqual(invalid.exception.code, 400)
+        error = json.loads(invalid.exception.read().decode("utf-8"))
+        self.assertEqual(error["code"], "INVALID_BLOCKER_KIND")
+
     def test_sop_api_requirement_direction_and_audit_flow(self):
         status, bootstrap = self.request_json("/api/sop/bootstrap")
         self.assertEqual(status, 200)

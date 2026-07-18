@@ -1,9 +1,9 @@
 # 唐诗插图批量生产 SOP 系统｜TODO 迭代开发文档
 
-> 文档版本：v1.8
+> 文档版本：v1.9
 > 编写日期：2026-07-18
 > 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档
-> 当前代码基线：本地实施版 `v0.14.0`
+> 当前代码基线：本地实施版 `v0.15.0`
 > 文档状态：持续迭代中；以任务状态和自动化测试为准
 
 ---
@@ -202,7 +202,7 @@ flowchart LR
 - [x] P0 未通过上游门禁的诗词，不允许静默进入下游批量任务；
 - [x] P0 批量操作先展示影响范围，再执行，并返回逐条结果；
 - [x] P0 所有自动产物均可人工编辑，编辑后产生新版本而非覆盖历史；
-- [ ] P0 阻塞项必须记录 `blocked_reason`、责任角色和建议动作；
+- [x] P0 阻塞项必须记录 `blocked_reason`、错误码、责任角色、建议动作和发生时间；异常中心可逐条下钻，恢复后自动退出当前队列；
 - [x] P0 服务重启后恢复到最后一次已持久化状态，不重复创建生成任务；
 - [ ] P1 支持阶段 SLA、逾期提醒和责任人筛选；
 - [ ] P1 支持跨阶段批注和 @责任人。
@@ -350,7 +350,7 @@ flowchart LR
 | 对象 | 关键字段 | 说明 |
 |---|---|---|
 | ProductionProject | id、name、brief、audience、spec、deadline、status | 一次完整生产项目 |
-| PoemRecord | id、title、author、dynasty、text、source、tags、status | 诗词主记录 |
+| PoemRecord | id、title、author、dynasty、text、source、tags、status、blocked_code、blocked_reason、blocked_role、blocked_action、blocked_at | 诗词主记录与当前结构化阻塞责任 |
 | ContentVersion | poem_id、title、author、dynasty、text、theme、mood、imagery、notes、source_version_id、version、status、change_summary、approved_by | 与来源版本绑定的不可变完整内容快照 |
 | InstructionVersion | scope、content、version、status、published_at | 全局 / 项目 AI 指令 |
 | RequirementCard | poem_id、content、must_have、avoid、risks、status、version | 结构化插图需求 |
@@ -571,8 +571,9 @@ flowchart LR
 - [x] `GET /api/poems/:id`：读取内容、需求、方向、任务、候选、返工、终审、导出和审计的全链路详情；
 - [x] `POST /api/poems/:id/source`：新增不可变来源版本并记录授权、核验人与核验日期；
 - [x] `POST /api/poems/:id/content/revisions`：创建新的完整 ContentVersion，保留历史并让当前需求 / 方向退出新排产；活动生成任务未结束时拒绝修订；
-- [x] `POST /api/poems/:id/content/approve`：批准内容版本。
+- [x] `POST /api/poems/:id/content/approve`：批准内容版本；
 - [x] `POST /api/poems/content/bulk-approve`：逐诗批准当前内容版本，返回成功、失败和失败原因。
+- [x] `GET /api/exceptions`：按异常类别、责任角色、级别和关键词查询持久化生产异常，返回错误码、建议动作与目标工作台。
 
 ### 10.2 指令、需求和方向
 
@@ -757,6 +758,7 @@ flowchart LR
 - [-] FE / BE 实现纯图与至少一种诗卡模板；
 - [x] BE 实现数据库与资产备份；
 - [x] BE 增加健康检查、结构化日志和异常汇总；
+- [x] BE / FE 将异常汇总升级为逐条责任队列，覆盖任务、QC、预算、导出、需求 / 方向运行和诗词阻塞，并提供处置路由；
 - [x] PM 建立日报：吞吐、失败、返工、成本和阶段积压；
 - [ ] AD / CE 完成 20 首终审；
 - [ ] QA 完成 7 天连续运行和备份恢复演练；
@@ -855,8 +857,11 @@ flowchart LR
 - [x] E03-T07 队列工作台；
 - [x] E03-T08 重启恢复；
 - [x] E03-T09 60 张压力与异常测试。
+- [x] E03-T10 建立结构化异常处置中心：统一投影任务、QC、预算、导出、需求 / 方向运行和诗词阻塞，记录责任角色与建议动作，恢复后自动清除。
 
 **验收：** 队列中的每个任务最终进入成功、失败、取消或明确阻塞状态。
+
+**v0.15.0 验收证据：** 诗词阻塞新增 `blocked_code`、`blocked_role`、`blocked_action` 和 `blocked_at`；`GET /api/exceptions` 将任务失败 / 结果未知 / 卡住、QC 隔离、预算阻塞、导出失败、需求 / 方向生成失败和诗词阻塞统一投影为逐条记录，并支持责任角色、级别与关键词筛选。总览异常卡显示责任人，逐条处置对话框展示证据和建议动作，可进入诗词详情或目标工作台；确认重试后结构化阻塞字段和异常队列同步清除。异常摘要会隐藏密钥、本机路径与原始结构化 Provider 响应。数据层、HTTP API、前端契约与真实浏览器处置闭环均已验证，全量 90 项自动化测试通过。
 
 ### EPIC-04：质检与候选路由
 

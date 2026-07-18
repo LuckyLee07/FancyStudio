@@ -1207,6 +1207,83 @@ class SopStoreTests(unittest.TestCase):
         self.assertIn("failed_tasks", anomaly_ids)
         self.assertEqual(len(report["daily"]), 7)
 
+    def test_structured_blocker_queue_assigns_owner_and_clears_after_recovery(self):
+        direction_id = self.ready_poem("jiang-xue")
+        batch = self.store.create_batch(
+            DEFAULT_PROJECT_ID,
+            ["jiang-xue"],
+            direction_ids=[direction_id],
+            style_id="ink-whitespace",
+            aspect_ratio="portrait",
+            count_per_direction=1,
+            provider="demo",
+            model="demo-renderer",
+            unit_cost=0,
+            actor={"id": "producer-blocker", "role": "producer"},
+        )
+        self.store.start_batch(batch["id"], actor=self.actor)
+        running = self.store.claim_next_task(batch["id"])
+        self.assertEqual(running["status"], "running")
+
+        recovered = SopStore(
+            self.database_path,
+            ROOT / "data" / "poems.json",
+            ROOT / "data" / "styles.json",
+        )
+        poem = next(
+            item
+            for item in recovered.list_poems()["items"]
+            if item["id"] == "jiang-xue"
+        )
+        self.assertEqual(poem["status"], "blocked")
+        self.assertEqual(poem["blocked_code"], "OUTCOME_UNKNOWN")
+        self.assertEqual(poem["blocked_role"], "producer")
+        self.assertIn("Provider", poem["blocked_action"])
+
+        task_blockers = recovered.production_blockers(
+            DEFAULT_PROJECT_ID, kind="blocked_tasks"
+        )
+        self.assertEqual(task_blockers["total"], 1)
+        self.assertEqual(task_blockers["items"][0]["target_id"], running["id"])
+        self.assertEqual(task_blockers["items"][0]["responsible_role"], "producer")
+        poem_blockers = recovered.production_blockers(
+            DEFAULT_PROJECT_ID,
+            kind="blocked_poems",
+            responsible_role="producer",
+            query="江雪",
+        )
+        self.assertEqual(poem_blockers["total"], 1)
+        self.assertEqual(poem_blockers["items"][0]["code"], "OUTCOME_UNKNOWN")
+        with self.assertRaises(WorkflowError) as invalid_kind:
+            recovered.production_blockers(DEFAULT_PROJECT_ID, kind="not-a-kind")
+        self.assertEqual(invalid_kind.exception.code, "INVALID_BLOCKER_KIND")
+
+        retried = recovered.retry_failed_tasks(
+            batch["id"],
+            confirm_unknown=True,
+            actor={"id": "producer-blocker", "role": "producer"},
+        )
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(
+            recovered.production_blockers(
+                DEFAULT_PROJECT_ID, kind="blocked_tasks"
+            )["total"],
+            0,
+        )
+        self.assertEqual(
+            recovered.production_blockers(
+                DEFAULT_PROJECT_ID, kind="blocked_poems"
+            )["total"],
+            0,
+        )
+        poem = next(
+            item
+            for item in recovered.list_poems()["items"]
+            if item["id"] == "jiang-xue"
+        )
+        self.assertEqual(poem["status"], "generating")
+        self.assertEqual(poem["blocked_code"], "")
+
     def test_provider_circuit_pauses_all_matching_active_batches(self):
         batch_ids = []
         for poem_id in ("jing-ye-si", "jiang-xue"):

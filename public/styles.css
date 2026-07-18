@@ -721,6 +721,18 @@ main {
   font-size: 9px;
 }
 
+.panel-heading-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.compact-button {
+  min-height: 28px;
+  padding: 5px 9px;
+  font-size: 8px;
+}
+
 .pipeline-grid {
   display: grid;
   margin-top: 26px;
@@ -1010,6 +1022,16 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 7px;
+}
+
+.anomaly-item em {
+  width: max-content;
+  padding: 2px 5px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 4px;
+  font-size: 7px;
+  font-style: normal;
 }
 
 .anomaly-item > i {
@@ -3310,6 +3332,132 @@ input[type="checkbox"] {
   box-shadow: 0 35px 100px rgba(0, 0, 0, 0.6);
 }
 
+#blocker-dialog {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.blocker-toolbar {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(280px, 1fr) auto auto;
+  align-items: end;
+}
+
+.blocker-toolbar .search-field {
+  min-width: 0;
+}
+
+.blocker-summary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.blocker-summary span {
+  display: grid;
+  padding: 10px 12px;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.blocker-summary small {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.blocker-summary strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 17px;
+}
+
+.blocker-record-list {
+  display: grid;
+  gap: 10px;
+}
+
+.blocker-record {
+  display: grid;
+  padding: 14px;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.022);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--yellow);
+  border-radius: 9px;
+}
+
+.blocker-record.severity-critical,
+.blocker-record.severity-high {
+  border-left-color: var(--red);
+}
+
+.blocker-record > header,
+.blocker-record > footer {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.blocker-record > header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.blocker-record > header span,
+.blocker-record > footer small,
+.blocker-action-copy > span {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.blocker-record > header strong {
+  font-size: 13px;
+}
+
+.blocker-record > header em {
+  padding: 4px 7px;
+  color: var(--cyan);
+  background: rgba(87, 203, 200, 0.08);
+  border: 1px solid rgba(87, 203, 200, 0.16);
+  border-radius: 6px;
+  font-size: 8px;
+  font-style: normal;
+}
+
+.blocker-evidence,
+.blocker-action-copy {
+  display: grid;
+  padding: 10px 11px;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 7px;
+}
+
+.blocker-evidence code {
+  width: max-content;
+  color: var(--red);
+  font-size: 8px;
+}
+
+.blocker-evidence p,
+.blocker-action-copy p {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.55;
+  font-size: 9px;
+}
+
+.blocker-action-copy p {
+  color: var(--muted);
+}
+
+.blocker-record > footer > div {
+  display: flex;
+  gap: 8px;
+}
+
 .form-stack {
   display: grid;
   gap: 13px;
@@ -3760,6 +3908,45 @@ input[type="checkbox"] {
 
 .poem-detail-hero span,
 .poem-detail-hero small {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.poem-blocker-banner {
+  display: grid;
+  padding: 12px 14px;
+  gap: 7px;
+  background: rgba(238, 102, 112, 0.055);
+  border: 1px solid rgba(238, 102, 112, 0.18);
+  border-radius: 9px;
+}
+
+.poem-blocker-banner > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.poem-blocker-banner span {
+  color: var(--red);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.poem-blocker-banner strong {
+  color: var(--cyan);
+  font-size: 9px;
+}
+
+.poem-blocker-banner p {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.55;
+  font-size: 9px;
+}
+
+.poem-blocker-banner small {
   color: var(--faint);
   font-size: 8px;
 }
@@ -4840,6 +5027,20 @@ input[type="checkbox"] {
 
   .queue-task-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .blocker-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .blocker-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .blocker-record > header,
+  .blocker-record > footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .search-field {

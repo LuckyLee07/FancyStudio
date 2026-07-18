@@ -155,7 +155,10 @@
               <article class="panel anomaly-panel">
                 <div class="panel-heading">
                   <div><p class="eyebrow">EXCEPTION CENTER</p><h2>异常中心</h2></div>
-                  <span class="panel-note" id="anomaly-total">0 项</span>
+                  <div class="panel-heading-actions">
+                    <span class="panel-note" id="anomaly-total">0 项</span>
+                    <button class="secondary-button compact-button" id="open-all-blockers" type="button">逐条处理</button>
+                  </div>
                 </div>
                 <div class="anomaly-list" id="anomaly-list"></div>
               </article>
@@ -654,6 +657,50 @@
             <button class="secondary-button" id="preview-import-button" type="submit">预检数据</button>
             <button class="primary-button" id="commit-import-button" type="button" disabled>确认导入</button>
           </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="blocker-dialog">
+      <form method="dialog" class="dialog-shell blocker-dialog-shell">
+        <header>
+          <div>
+            <p class="eyebrow">OWNED EXCEPTION QUEUE</p>
+            <h2 id="blocker-dialog-title">异常处置中心</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭">×</button>
+        </header>
+        <div class="dialog-body">
+          <div class="blocker-toolbar">
+            <label class="search-field">
+              <span aria-hidden="true">⌕</span>
+              <input id="blocker-query" type="search" placeholder="搜索诗词、批次、错误码或原因" />
+            </label>
+            <label class="filter-field">责任角色
+              <select id="blocker-role-filter">
+                <option value="">全部角色</option>
+                <option value="producer">制片人</option>
+                <option value="content_editor">内容编辑</option>
+                <option value="art_director">美术指导</option>
+                <option value="ai_operator">AI 操作员</option>
+                <option value="system_admin">系统管理员</option>
+              </select>
+            </label>
+            <label class="filter-field">级别
+              <select id="blocker-severity-filter">
+                <option value="">全部级别</option>
+                <option value="critical">紧急</option>
+                <option value="high">高</option>
+                <option value="medium">中</option>
+              </select>
+            </label>
+          </div>
+          <div class="blocker-summary" id="blocker-summary"></div>
+          <div class="blocker-record-list" id="blocker-list"></div>
+        </div>
+        <footer>
+          <span>异常来自持久化生产状态；恢复成功后会自动退出当前队列。</span>
+          <button class="secondary-button" value="cancel" type="button" data-close-dialog>关闭</button>
         </footer>
       </form>
     </dialog>

@@ -171,6 +171,98 @@ STAGE_DEFINITIONS = (
     ("blocked", "阻塞", ("blocked", "paused")),
 )
 
+BLOCKER_DEFINITIONS = {
+    "stale_tasks": {
+        "label": "疑似卡住任务",
+        "severity": "critical",
+        "responsible_role": "system_admin",
+        "view": "queue",
+        "filter": "running",
+        "suggested_action": "核对 Provider 调用与任务 Attempt，确认后暂停或恢复任务。",
+    },
+    "blocked_tasks": {
+        "label": "结果未知任务",
+        "severity": "critical",
+        "responsible_role": "producer",
+        "view": "queue",
+        "filter": "blocked",
+        "suggested_action": "人工核对 Provider 结果，确认未计费后显式重试。",
+    },
+    "failed_tasks": {
+        "label": "失败任务",
+        "severity": "high",
+        "responsible_role": "ai_operator",
+        "view": "queue",
+        "filter": "failed",
+        "suggested_action": "按错误码修正参数，仅重试可恢复失败。",
+    },
+    "qc_blocked": {
+        "label": "QC 硬失败",
+        "severity": "high",
+        "responsible_role": "art_director",
+        "view": "review",
+        "filter": "qc_blocked",
+        "suggested_action": "检查文件、比例、文字、历史风险或重复图后决定淘汰或人工覆盖。",
+    },
+    "manual_qc": {
+        "label": "待人工 QC",
+        "severity": "medium",
+        "responsible_role": "art_director",
+        "view": "review",
+        "filter": "needs_manual_qc",
+        "suggested_action": "人工确认视觉服务未覆盖的诗意、历史与系列一致性问题。",
+    },
+    "budget_blocked": {
+        "label": "预算阻塞批次",
+        "severity": "high",
+        "responsible_role": "producer",
+        "view": "resources",
+        "filter": "budget_blocked",
+        "suggested_action": "复核批次成本，调整预算规则或取消未开始任务。",
+    },
+    "failed_exports": {
+        "label": "失败导出包",
+        "severity": "high",
+        "responsible_role": "producer",
+        "view": "assets",
+        "filter": "failed",
+        "suggested_action": "修复缺失资产或规格问题后创建新的不可覆盖导出包。",
+    },
+    "failed_requirement_runs": {
+        "label": "需求生成异常",
+        "severity": "high",
+        "responsible_role": "content_editor",
+        "view": "requirements",
+        "filter": "failed",
+        "suggested_action": "查看 Schema 错误，修订内容或锁定字段后重试该诗需求。",
+    },
+    "failed_direction_runs": {
+        "label": "方向生成异常",
+        "severity": "high",
+        "responsible_role": "art_director",
+        "view": "directions",
+        "filter": "failed",
+        "suggested_action": "查看三方向 Schema 与差异报告，修订冲突字段后原子重试。",
+    },
+    "blocked_poems": {
+        "label": "阻塞诗词",
+        "severity": "medium",
+        "responsible_role": "producer",
+        "view": "overview",
+        "filter": "blocked",
+        "suggested_action": "查看阻塞错误码、责任角色和建议动作后进入对应工作台处理。",
+    },
+}
+
+BLOCKER_KINDS = set(BLOCKER_DEFINITIONS)
+BLOCKER_ROLES = {
+    "producer",
+    "content_editor",
+    "art_director",
+    "ai_operator",
+    "system_admin",
+}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -191,6 +283,30 @@ def _decode(value: str | None, default: Any) -> Any:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _public_failure_reason(value: Any, fallback: str) -> str:
+    """Keep operator context while redacting common local secrets and paths."""
+
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    if lowered.startswith(("{", "[", "<html", "<!doctype")):
+        return fallback
+    if any(marker in lowered for marker in ("authorization:", "bearer ", "api_key=")):
+        return fallback
+    text = re.sub(
+        r"\bsk-[A-Za-z0-9_-]{8,}\b",
+        "[密钥已隐藏]",
+        text,
+    )
+    text = re.sub(
+        r"(?:(?:/Users|/private|/var|/tmp|/home)/[^\s,;，。]+|[A-Za-z]:\\[^\s,;，。]+)",
+        "[本机路径已隐藏]",
+        text,
+    )
+    return text[:500] or fallback
 
 
 class WorkflowError(ValueError):
@@ -1172,6 +1288,45 @@ class SopStore:
                     COMMIT;
                     """
                 )
+            if 14 not in applied:
+                connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+
+                    ALTER TABLE poems
+                    ADD COLUMN blocked_code TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE poems
+                    ADD COLUMN blocked_role TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE poems
+                    ADD COLUMN blocked_action TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE poems
+                    ADD COLUMN blocked_at TEXT;
+
+                    UPDATE poems
+                    SET blocked_code = CASE
+                            WHEN blocked_code = '' THEN 'LEGACY_BLOCKED'
+                            ELSE blocked_code
+                        END,
+                        blocked_role = CASE
+                            WHEN blocked_role = '' THEN 'producer'
+                            ELSE blocked_role
+                        END,
+                        blocked_action = CASE
+                            WHEN blocked_action = '' THEN '查看生产证据链并进入对应工作台处理。'
+                            ELSE blocked_action
+                        END,
+                        blocked_at = COALESCE(blocked_at, updated_at)
+                    WHERE status = 'blocked';
+
+                    CREATE INDEX idx_poems_project_blocker
+                    ON poems(project_id, status, blocked_role, blocked_code);
+
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (14, CURRENT_TIMESTAMP);
+
+                    COMMIT;
+                    """
+                )
 
     def _recover_interrupted_work(self) -> None:
         """Make crash recovery explicit without automatically repeating billed work."""
@@ -1220,17 +1375,14 @@ class SopStore:
                             task["id"],
                         ),
                     )
-                    connection.execute(
-                        """
-                        UPDATE poems
-                        SET status = 'blocked', blocked_reason = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            "生成任务执行结果未知，等待人工核对。",
-                            now,
-                            task["poem_id"],
-                        ),
+                    self._block_poem_locked(
+                        connection,
+                        task["poem_id"],
+                        code="OUTCOME_UNKNOWN",
+                        reason="生成任务执行结果未知，等待人工核对。",
+                        responsible_role="producer",
+                        suggested_action="核对 Provider 账单与产物，确认未成功后再显式重试。",
+                        now=now,
                     )
                     self._audit(
                         connection,
@@ -1674,6 +1826,42 @@ class SopStore:
             ),
         )
 
+    @staticmethod
+    def _block_poem_locked(
+        connection: sqlite3.Connection,
+        poem_id: str,
+        *,
+        code: str,
+        reason: str,
+        responsible_role: str,
+        suggested_action: str,
+        now: str,
+    ) -> None:
+        role = (
+            responsible_role
+            if responsible_role in BLOCKER_ROLES
+            else "producer"
+        )
+        connection.execute(
+            """
+            UPDATE poems
+            SET status = 'blocked', blocked_code = ?, blocked_reason = ?,
+                blocked_role = ?, blocked_action = ?, blocked_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(code).strip()[:100] or "WORKFLOW_BLOCKED",
+                str(reason).strip()[:1000] or "生产流程需要人工处理。",
+                role,
+                str(suggested_action).strip()[:1000]
+                or "查看生产证据链并进入对应工作台处理。",
+                now,
+                now,
+                poem_id,
+            ),
+        )
+
     def record_system_audit(
         self,
         action: str,
@@ -1710,6 +1898,11 @@ class SopStore:
         item = dict(row)
         item["lines"] = _decode(item.pop("lines_json", None), [])
         item["imagery"] = _decode(item.pop("imagery_json", None), [])
+        if item.get("status") != "blocked":
+            item["blocked_code"] = ""
+            item["blocked_role"] = ""
+            item["blocked_action"] = ""
+            item["blocked_at"] = None
         if "requirement_content" in item:
             item["requirement"] = (
                 {
@@ -2271,29 +2464,13 @@ class SopStore:
             if row["day"] in daily_by_date:
                 daily_by_date[row["day"]]["finalized"] = int(row["finalized"] or 0)
 
-        anomaly_definitions = (
-            ("stale_tasks", "疑似卡住任务", "critical", "queue", "running", "核对 Provider 调用与任务 Attempt"),
-            ("blocked_tasks", "结果未知任务", "critical", "queue", "blocked", "人工核对后显式重试"),
-            ("failed_tasks", "失败任务", "high", "queue", "failed", "按错误分类重试或修正参数"),
-            ("qc_blocked", "QC 硬失败", "high", "review", "qc_blocked", "检查文件、比例、文字或重复图"),
-            ("manual_qc", "待人工 QC", "medium", "review", "needs_manual_qc", "人工确认自动规则未覆盖项"),
-            ("budget_blocked", "预算阻塞批次", "high", "resources", "budget_blocked", "调整预算或取消批次"),
-            ("failed_exports", "失败导出包", "high", "assets", "failed", "修复文件后重新导出"),
-            ("failed_requirement_runs", "需求生成异常", "high", "requirements", "failed", "查看 Schema 错误并重试该诗需求"),
-            ("failed_direction_runs", "方向生成异常", "high", "directions", "failed", "查看三方向 Schema 或差异错误并重试"),
-            ("blocked_poems", "阻塞诗词", "medium", "overview", "blocked", "查看阻塞原因并指定责任人"),
-        )
         anomalies = [
             {
                 "id": key,
-                "label": label,
-                "severity": severity,
+                **definition,
                 "count": int(anomaly_counts.get(key) or 0),
-                "view": view,
-                "filter": filter_value,
-                "suggested_action": suggested_action,
             }
-            for key, label, severity, view, filter_value, suggested_action in anomaly_definitions
+            for key, definition in BLOCKER_DEFINITIONS.items()
             if int(anomaly_counts.get(key) or 0) > 0
         ]
         converged = int(task_metrics.get("succeeded") or 0) + int(
@@ -2340,6 +2517,358 @@ class SopStore:
             "anomalies": anomalies,
             "anomaly_count": sum(item["count"] for item in anomalies),
             "generated_at": utc_now(),
+        }
+
+    def production_blockers(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        *,
+        kind: str | None = None,
+        responsible_role: str | None = None,
+        severity: str | None = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Project current persistent failure states into one actionable queue."""
+
+        self.project(project_id)
+        if kind and kind not in BLOCKER_KINDS:
+            raise WorkflowError("INVALID_BLOCKER_KIND", "不支持的异常分类。")
+        if responsible_role and responsible_role not in BLOCKER_ROLES:
+            raise WorkflowError("INVALID_BLOCKER_ROLE", "不支持的责任角色。")
+        if severity and severity not in {"critical", "high", "medium"}:
+            raise WorkflowError("INVALID_BLOCKER_SEVERITY", "不支持的异常级别。")
+        query = str(query or "").strip().lower()[:100]
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        stale_cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=30)
+        ).isoformat(timespec="seconds")
+        items: list[dict[str, Any]] = []
+
+        def append_item(
+            blocker_kind: str,
+            *,
+            target_type: str,
+            target_id: str,
+            code: str,
+            reason: str,
+            updated_at: str,
+            poem_id: str = "",
+            poem_title: str = "",
+            batch_id: str = "",
+            batch_name: str = "",
+            responsible: str = "",
+            action: str = "",
+        ) -> None:
+            definition = BLOCKER_DEFINITIONS[blocker_kind]
+            items.append(
+                {
+                    "id": f"{blocker_kind}:{target_id}",
+                    "kind": blocker_kind,
+                    "label": definition["label"],
+                    "severity": definition["severity"],
+                    "target_type": target_type,
+                    "target_id": target_id,
+                    "poem_id": poem_id,
+                    "poem_title": poem_title,
+                    "batch_id": batch_id,
+                    "batch_name": batch_name,
+                    "code": str(code or "WORKFLOW_BLOCKED")[:100],
+                    "reason": str(reason or definition["label"])[:1000],
+                    "responsible_role": (
+                        responsible
+                        if responsible in BLOCKER_ROLES
+                        else definition["responsible_role"]
+                    ),
+                    "suggested_action": str(
+                        action or definition["suggested_action"]
+                    )[:1000],
+                    "view": definition["view"],
+                    "filter": definition["filter"],
+                    "updated_at": updated_at,
+                }
+            )
+
+        requested = {kind} if kind else BLOCKER_KINDS
+        with self._connect() as connection:
+            if requested & {"stale_tasks", "blocked_tasks", "failed_tasks"}:
+                task_rows = connection.execute(
+                    """
+                    SELECT t.id, t.status, t.last_error_code,
+                           t.last_error_message, t.updated_at, t.batch_id,
+                           p.id AS poem_id, p.title AS poem_title,
+                           b.name AS batch_name
+                    FROM generation_tasks t
+                    JOIN generation_batches b ON b.id = t.batch_id
+                    JOIN poems p ON p.id = t.poem_id
+                    WHERE b.project_id = ? AND b.purpose != 'style_benchmark'
+                      AND (
+                        t.status IN ('failed', 'blocked')
+                        OR (t.status = 'running' AND t.updated_at < ?)
+                      )
+                    ORDER BY t.updated_at DESC
+                    """,
+                    (project_id, stale_cutoff),
+                ).fetchall()
+                for row in task_rows:
+                    blocker_kind = (
+                        "stale_tasks"
+                        if row["status"] == "running"
+                        else "blocked_tasks"
+                        if row["status"] == "blocked"
+                        else "failed_tasks"
+                    )
+                    if blocker_kind not in requested:
+                        continue
+                    append_item(
+                        blocker_kind,
+                        target_type="generation_task",
+                        target_id=row["id"],
+                        code=row["last_error_code"]
+                        or ("STALE_TASK" if blocker_kind == "stale_tasks" else "TASK_FAILED"),
+                        reason=_public_failure_reason(
+                            row["last_error_message"],
+                            "任务运行超过 30 分钟且没有状态更新。"
+                            if blocker_kind == "stale_tasks"
+                            else "生成任务未收敛，需要人工处理。",
+                        ),
+                        updated_at=row["updated_at"],
+                        poem_id=row["poem_id"],
+                        poem_title=row["poem_title"],
+                        batch_id=row["batch_id"],
+                        batch_name=row["batch_name"],
+                    )
+
+            if requested & {"qc_blocked", "manual_qc"}:
+                image_rows = connection.execute(
+                    """
+                    SELECT i.id, i.status, i.updated_at, i.batch_id,
+                           p.id AS poem_id, p.title AS poem_title,
+                           b.name AS batch_name, q.status AS qc_status,
+                           q.hard_failures_json, q.warnings_json
+                    FROM production_images i
+                    JOIN poems p ON p.id = i.poem_id
+                    JOIN generation_batches b ON b.id = i.batch_id
+                    LEFT JOIN qc_results q ON q.id = (
+                        SELECT q2.id FROM qc_results q2
+                        WHERE q2.image_id = i.id
+                        ORDER BY q2.created_at DESC LIMIT 1
+                    )
+                    WHERE i.project_id = ? AND b.purpose != 'style_benchmark'
+                      AND i.status IN ('qc_blocked', 'needs_manual_qc')
+                    ORDER BY i.updated_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall()
+                for row in image_rows:
+                    blocker_kind = (
+                        "qc_blocked"
+                        if row["status"] == "qc_blocked"
+                        else "manual_qc"
+                    )
+                    if blocker_kind not in requested:
+                        continue
+                    evidence = (
+                        _decode(row["hard_failures_json"], [])
+                        if blocker_kind == "qc_blocked"
+                        else _decode(row["warnings_json"], [])
+                    )
+                    append_item(
+                        blocker_kind,
+                        target_type="production_image",
+                        target_id=row["id"],
+                        code=(row["qc_status"] or blocker_kind).upper(),
+                        reason=(
+                            "QC 证据：" + "、".join(str(item) for item in evidence[:4])
+                            if evidence
+                            else "自动质检要求人工确认该候选。"
+                        ),
+                        updated_at=row["updated_at"],
+                        poem_id=row["poem_id"],
+                        poem_title=row["poem_title"],
+                        batch_id=row["batch_id"],
+                        batch_name=row["batch_name"],
+                    )
+
+            if "budget_blocked" in requested:
+                for row in connection.execute(
+                    """
+                    SELECT id, name, updated_at FROM generation_batches
+                    WHERE project_id = ? AND purpose != 'style_benchmark'
+                      AND status = 'budget_blocked'
+                    ORDER BY updated_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall():
+                    append_item(
+                        "budget_blocked",
+                        target_type="generation_batch",
+                        target_id=row["id"],
+                        code="BUDGET_LIMIT_EXCEEDED",
+                        reason=f"批次「{row['name']}」未通过项目预算硬门禁。",
+                        updated_at=row["updated_at"],
+                        batch_id=row["id"],
+                        batch_name=row["name"],
+                    )
+
+            if "failed_exports" in requested:
+                for row in connection.execute(
+                    """
+                    SELECT id, name, created_at, completed_at
+                    FROM export_packages
+                    WHERE project_id = ? AND status = 'failed'
+                    ORDER BY created_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall():
+                    append_item(
+                        "failed_exports",
+                        target_type="export_package",
+                        target_id=row["id"],
+                        code="EXPORT_FAILED",
+                        reason=f"导出包「{row['name']}」创建失败；原始本机错误未在工作台暴露。",
+                        updated_at=row["completed_at"] or row["created_at"],
+                    )
+
+            if "failed_requirement_runs" in requested:
+                for row in connection.execute(
+                    """
+                    SELECT r.id, r.poem_id, r.error_code, r.validation_json,
+                           r.completed_at, p.title AS poem_title
+                    FROM requirement_generation_runs r
+                    JOIN poems p ON p.id = r.poem_id
+                    WHERE r.project_id = ? AND r.status = 'failed'
+                      AND r.resolved_at IS NULL
+                    ORDER BY r.completed_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall():
+                    issues = _decode(row["validation_json"], {}).get(
+                        "final_issues", []
+                    )
+                    append_item(
+                        "failed_requirement_runs",
+                        target_type="requirement_generation_run",
+                        target_id=row["id"],
+                        code=row["error_code"] or "REQUIREMENT_GENERATION_FAILED",
+                        reason=(
+                            str(issues[0].get("message") or "需求生成未通过生产合同。")
+                            if issues
+                            else "需求生成未通过生产合同。"
+                        ),
+                        updated_at=row["completed_at"],
+                        poem_id=row["poem_id"],
+                        poem_title=row["poem_title"],
+                    )
+
+            if "failed_direction_runs" in requested:
+                for row in connection.execute(
+                    """
+                    SELECT r.id, r.poem_id, r.error_code, r.validation_json,
+                           r.completed_at, p.title AS poem_title
+                    FROM direction_generation_runs r
+                    JOIN poems p ON p.id = r.poem_id
+                    WHERE r.project_id = ? AND r.status = 'failed'
+                      AND r.resolved_at IS NULL
+                    ORDER BY r.completed_at DESC
+                    """,
+                    (project_id,),
+                ).fetchall():
+                    issues = _decode(row["validation_json"], {}).get(
+                        "final_issues", []
+                    )
+                    append_item(
+                        "failed_direction_runs",
+                        target_type="direction_generation_run",
+                        target_id=row["id"],
+                        code=row["error_code"] or "DIRECTION_GENERATION_FAILED",
+                        reason=(
+                            str(issues[0].get("message") or "方向生成未通过生产合同。")
+                            if issues
+                            else "方向生成未通过生产合同。"
+                        ),
+                        updated_at=row["completed_at"],
+                        poem_id=row["poem_id"],
+                        poem_title=row["poem_title"],
+                    )
+
+            if "blocked_poems" in requested:
+                for row in connection.execute(
+                    """
+                    SELECT id, title, blocked_code, blocked_reason,
+                           blocked_role, blocked_action,
+                           COALESCE(blocked_at, updated_at) AS blocked_at
+                    FROM poems
+                    WHERE project_id = ? AND status = 'blocked'
+                    ORDER BY COALESCE(blocked_at, updated_at) DESC
+                    """,
+                    (project_id,),
+                ).fetchall():
+                    append_item(
+                        "blocked_poems",
+                        target_type="poem",
+                        target_id=row["id"],
+                        code=row["blocked_code"] or "WORKFLOW_BLOCKED",
+                        reason=row["blocked_reason"],
+                        responsible=row["blocked_role"],
+                        action=row["blocked_action"],
+                        updated_at=row["blocked_at"],
+                        poem_id=row["id"],
+                        poem_title=row["title"],
+                    )
+
+        items.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+        filtered = [
+            item
+            for item in items
+            if (not responsible_role or item["responsible_role"] == responsible_role)
+            and (not severity or item["severity"] == severity)
+            and (
+                not query
+                or query
+                in " ".join(
+                    str(item.get(field) or "")
+                    for field in (
+                        "label",
+                        "code",
+                        "reason",
+                        "poem_title",
+                        "batch_name",
+                    )
+                ).lower()
+            )
+        ]
+        summary_items = filtered
+        return {
+            "project_id": project_id,
+            "items": filtered[offset : offset + limit],
+            "total": len(filtered),
+            "limit": limit,
+            "offset": offset,
+            "summary": {
+                "open_total": len(summary_items),
+                "by_kind": {
+                    blocker_kind: sum(
+                        item["kind"] == blocker_kind for item in summary_items
+                    )
+                    for blocker_kind in BLOCKER_DEFINITIONS
+                },
+                "by_role": {
+                    role: sum(
+                        item["responsible_role"] == role for item in summary_items
+                    )
+                    for role in sorted(BLOCKER_ROLES)
+                },
+                "by_severity": {
+                    level: sum(
+                        item["severity"] == level for item in summary_items
+                    )
+                    for level in ("critical", "high", "medium")
+                },
+                "generated_at": utc_now(),
+            },
         }
 
     def list_poems(
@@ -3073,7 +3602,8 @@ class SopStore:
                     SET title = ?, author = ?, dynasty = ?, lines_json = ?,
                         theme = ?, mood = ?, imagery_json = ?,
                         status = 'content_review', blocked_reason = '',
-                        updated_at = ?
+                        blocked_code = '', blocked_role = '',
+                        blocked_action = '', blocked_at = NULL, updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -3442,7 +3972,8 @@ class SopStore:
                     """
                     UPDATE poems
                     SET status = 'requirement_draft', blocked_reason = '',
-                        updated_at = ?
+                        blocked_code = '', blocked_role = '',
+                        blocked_action = '', blocked_at = NULL, updated_at = ?
                     WHERE id = ?
                     """,
                     (now, poem_id),
@@ -7360,7 +7891,10 @@ class SopStore:
                         (now, image_id),
                     )
                     connection.execute(
-                        "UPDATE poems SET status = 'approved', blocked_reason = '', updated_at = ? WHERE id = ?",
+                        """UPDATE poems SET status = 'approved', blocked_reason = '',
+                           blocked_code = '', blocked_role = '',
+                           blocked_action = '', blocked_at = NULL, updated_at = ?
+                           WHERE id = ?""",
                         (now, image["poem_id"]),
                     )
                 connection.execute("COMMIT")
@@ -7958,7 +8492,10 @@ class SopStore:
                     connection.execute(
                         """
                         UPDATE poems
-                        SET status = 'generating', blocked_reason = '', updated_at = ?
+                        SET status = 'generating', blocked_reason = '',
+                            blocked_code = '', blocked_role = '',
+                            blocked_action = '', blocked_at = NULL,
+                            updated_at = ?
                         WHERE id IN (
                             SELECT DISTINCT poem_id
                             FROM generation_tasks
@@ -8296,7 +8833,10 @@ class SopStore:
                     connection.execute(
                         """
                         UPDATE poems
-                        SET status = 'generating', blocked_reason = '', updated_at = ?
+                        SET status = 'generating', blocked_reason = '',
+                            blocked_code = '', blocked_role = '',
+                            blocked_action = '', blocked_at = NULL,
+                            updated_at = ?
                         WHERE id IN (
                             SELECT DISTINCT poem_id
                             FROM generation_tasks
@@ -8781,35 +9321,62 @@ class SopStore:
             if image_counts.get("final_candidate", 0):
                 poem_status = "final_review"
                 blocked_reason = ""
+                blocked_code = blocked_role = blocked_action = ""
+                blocked_at = None
             elif any(
                 image_counts.get(status, 0)
                 for status in ("review_ready", "selected")
             ):
                 poem_status = "candidate_review"
                 blocked_reason = ""
+                blocked_code = blocked_role = blocked_action = ""
+                blocked_at = None
             elif any(
                 image_counts.get(status, 0)
                 for status in ("qc_blocked", "needs_manual_qc")
             ):
                 poem_status = "blocked"
                 blocked_reason = "候选未通过自动质检或需要人工 QC。"
+                blocked_code = "QC_REVIEW_REQUIRED"
+                blocked_role = "art_director"
+                blocked_action = "进入审片台查看 QC 证据，执行淘汰、人工覆盖或返工。"
+                blocked_at = now
             elif counts.get("succeeded", 0):
                 # Compatibility for tasks completed before ProductionImage v3.
                 poem_status = "candidate_review"
                 blocked_reason = ""
+                blocked_code = blocked_role = blocked_action = ""
+                blocked_at = None
             elif counts.get("blocked", 0):
                 poem_status = "blocked"
                 blocked_reason = "生成任务需要人工核对。"
+                blocked_code = "OUTCOME_UNKNOWN"
+                blocked_role = "producer"
+                blocked_action = "核对 Provider 账单与产物，确认未成功后再显式重试。"
+                blocked_at = now
             else:
                 poem_status = "ready_for_production"
                 blocked_reason = ""
+                blocked_code = blocked_role = blocked_action = ""
+                blocked_at = None
             connection.execute(
                 """
                 UPDATE poems
-                SET status = ?, blocked_reason = ?, updated_at = ?
+                SET status = ?, blocked_reason = ?, blocked_code = ?,
+                    blocked_role = ?, blocked_action = ?, blocked_at = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (poem_status, blocked_reason, now, poem_id),
+                (
+                    poem_status,
+                    blocked_reason,
+                    blocked_code,
+                    blocked_role,
+                    blocked_action,
+                    blocked_at,
+                    now,
+                    poem_id,
+                ),
             )
 
     def execution_state(self, batch_id: str) -> dict[str, Any]:
@@ -8848,6 +9415,7 @@ class SopStore:
         return {
             "summary": self.summary(project_id),
             "production_report": self.production_report(project_id),
+            "blockers": self.production_blockers(project_id, limit=100),
             "data_quality": self.data_quality_report(project_id),
             "poems": self.list_poems(project_id)["items"],
             "requirements": self.requirements(project_id),
@@ -9187,9 +9755,14 @@ class SopStore:
                                 actor_id=actor_id,
                                 now=now,
                             )
-                            connection.execute(
-                                "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                                ("需求生成器调用失败，请在异常中心重试。", now, poem_id),
+                            self._block_poem_locked(
+                                connection,
+                                poem_id,
+                                code="REQUIREMENT_GENERATOR_FAILED",
+                                reason="需求生成器调用失败，请在异常中心重试。",
+                                responsible_role="content_editor",
+                                suggested_action="确认内容版本与指令后重试；若持续失败，交由系统管理员检查生成服务。",
+                                now=now,
                             )
                             self._audit(
                                 connection,
@@ -9242,9 +9815,14 @@ class SopStore:
                             actor_id=actor_id,
                             now=now,
                         )
-                        connection.execute(
-                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                            ("需求输出连续两次未通过 RequirementCard Schema。", now, poem_id),
+                        self._block_poem_locked(
+                            connection,
+                            poem_id,
+                            code="REQUIREMENT_SCHEMA_INVALID",
+                            reason="需求输出连续两次未通过 RequirementCard Schema。",
+                            responsible_role="content_editor",
+                            suggested_action="打开需求生成异常，依据首个 Schema 问题修订内容或人工创建合规需求。",
+                            now=now,
                         )
                         self._audit(
                             connection,
@@ -9324,9 +9902,14 @@ class SopStore:
                             actor_id=actor_id,
                             now=now,
                         )
-                        connection.execute(
-                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                            ("锁定字段与 RequirementCard Schema 冲突，请人工修订。", now, poem_id),
+                        self._block_poem_locked(
+                            connection,
+                            poem_id,
+                            code="LOCKED_FIELD_SCHEMA_INVALID",
+                            reason="锁定字段与 RequirementCard Schema 冲突，请人工修订。",
+                            responsible_role="content_editor",
+                            suggested_action="解除冲突锁定字段或在需求侧栏中修订为符合 Schema 的值。",
+                            now=now,
                         )
                         self._audit(
                             connection,
@@ -9414,6 +9997,8 @@ class SopStore:
                         """
                         UPDATE poems
                         SET status = 'requirement_review', blocked_reason = '',
+                            blocked_code = '', blocked_role = '',
+                            blocked_action = '', blocked_at = NULL,
                             updated_at = ?
                         WHERE id = ?
                         """,
@@ -10013,9 +10598,14 @@ class SopStore:
                             actor_id=actor_id,
                             now=now,
                         )
-                        connection.execute(
-                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                            ("方向生成缺少已批准内容版本。", now, poem_id),
+                        self._block_poem_locked(
+                            connection,
+                            poem_id,
+                            code="APPROVED_CONTENT_REQUIRED",
+                            reason="方向生成缺少已批准内容版本。",
+                            responsible_role="content_editor",
+                            suggested_action="返回内容校验，批准当前最新 ContentVersion 后重新生成需求与方向。",
+                            now=now,
                         )
                         self._audit(
                             connection,
@@ -10088,9 +10678,14 @@ class SopStore:
                                 actor_id=actor_id,
                                 now=now,
                             )
-                            connection.execute(
-                                "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                                ("方向策划器调用失败，请在异常中心重试。", now, poem_id),
+                            self._block_poem_locked(
+                                connection,
+                                poem_id,
+                                code="DIRECTION_GENERATOR_FAILED",
+                                reason="方向策划器调用失败，请在异常中心重试。",
+                                responsible_role="art_director",
+                                suggested_action="确认需求已批准后重试；若持续失败，交由系统管理员检查策划服务。",
+                                now=now,
                             )
                             self._audit(
                                 connection,
@@ -10136,9 +10731,14 @@ class SopStore:
                             actor_id=actor_id,
                             now=now,
                         )
-                        connection.execute(
-                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                            ("三方向自动修复一次后仍未通过 Schema 或差异门禁。", now, poem_id),
+                        self._block_poem_locked(
+                            connection,
+                            poem_id,
+                            code="DIRECTION_SET_INVALID",
+                            reason="三方向自动修复一次后仍未通过 Schema 或差异门禁。",
+                            responsible_role="art_director",
+                            suggested_action="查看三方向差异报告，修订冲突方向或锁定字段后原子重试。",
+                            now=now,
                         )
                         self._audit(
                             connection,
@@ -10225,9 +10825,14 @@ class SopStore:
                             actor_id=actor_id,
                             now=now,
                         )
-                        connection.execute(
-                            "UPDATE poems SET status = 'blocked', blocked_reason = ?, updated_at = ? WHERE id = ?",
-                            ("锁定字段破坏了三方向差异门禁，请人工修订。", now, poem_id),
+                        self._block_poem_locked(
+                            connection,
+                            poem_id,
+                            code="LOCKED_DIRECTION_SET_INVALID",
+                            reason="锁定字段破坏了三方向差异门禁，请人工修订。",
+                            responsible_role="art_director",
+                            suggested_action="解除造成同质化的锁定字段，确保三方向在至少两个视觉轴上不同。",
+                            now=now,
                         )
                         self._audit(
                             connection,
@@ -10327,7 +10932,9 @@ class SopStore:
                     connection.execute(
                         """
                         UPDATE poems SET status = 'direction_review',
-                            blocked_reason = '', updated_at = ? WHERE id = ?
+                            blocked_reason = '', blocked_code = '',
+                            blocked_role = '', blocked_action = '',
+                            blocked_at = NULL, updated_at = ? WHERE id = ?
                         """,
                         (now, poem_id),
                     )

@@ -102,6 +102,28 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("requirement-contract-line", script)
         self.assertIn("generation-error-note", styles)
 
+    def test_exception_center_exposes_owned_actionable_records(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        for element_id in (
+            "open-all-blockers",
+            "blocker-dialog",
+            "blocker-role-filter",
+            "blocker-severity-filter",
+            "blocker-query",
+            "blocker-summary",
+            "blocker-list",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("/api/exceptions?", script)
+        self.assertIn("function openBlockerDialog", script)
+        self.assertIn("function routeBlocker", script)
+        self.assertIn("responsible_role", script)
+        self.assertIn("suggested_action", script)
+        self.assertIn("blocker-record", styles)
+        self.assertIn("poem-blocker-banner", styles)
+
     def test_direction_contract_diversity_and_failures_are_visible(self):
         html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
