@@ -144,6 +144,78 @@ class SopStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["qc_policy"]["content"]["semantic_version"], "1.0.0")
         self.assertEqual(snapshot["qc_calibration"]["sample_count"], 0)
 
+    def test_requirement_board_projects_every_poem_with_filters_and_action_gates(self):
+        board = self.store.requirement_board()
+        self.assertEqual(board["total"], 12)
+        self.assertEqual(board["summary"]["by_stage"]["waiting_generation"], 12)
+        self.assertIn("李白", board["facets"]["authors"])
+        waiting = next(item for item in board["items"] if item["poem_id"] == "jing-ye-si")
+        self.assertTrue(waiting["can_generate"])
+        self.assertEqual(waiting["responsible_role"], "content_editor")
+
+        with self.store._track_requirement_generation(["jing-ye-si"]):
+            generating = self.store.requirement_board(stage="generating")
+            self.assertEqual(generating["total"], 1)
+            self.assertEqual(generating["items"][0]["poem_id"], "jing-ye-si")
+            self.assertFalse(generating["items"][0]["can_generate"])
+
+        generated = self.store.generate_requirements(
+            DEFAULT_PROJECT_ID,
+            ["jing-ye-si"],
+            actor=self.actor,
+        )
+        requirement_id = generated["results"][0]["requirement_id"]
+        review = self.store.requirement_board(
+            stage="in_review",
+            author="李白",
+            responsible_role="content_editor",
+            query="静夜思",
+        )
+        self.assertEqual(review["total"], 1)
+        self.assertEqual(review["items"][0]["requirement_id"], requirement_id)
+        self.assertTrue(review["items"][0]["can_edit"])
+        self.assertTrue(review["items"][0]["can_review"])
+        self.assertTrue(review["items"][0]["scene"])
+        self.assertIn("core_imagery", review["items"][0]["requirement"]["content"])
+
+        self.store.decide_requirement(
+            requirement_id,
+            "approve",
+            actor=self.actor,
+        )
+        approved = self.store.requirement_board(
+            stage="approved",
+            responsible_role="art_director",
+        )
+        self.assertEqual(approved["total"], 1)
+        self.assertFalse(approved["items"][0]["can_edit"])
+        self.assertIn("已批准", approved["items"][0]["missing_condition"])
+
+        with self.store._connect() as connection:
+            connection.execute(
+                """
+                UPDATE poems
+                SET status='blocked', blocked_code='TEST_REQUIREMENT_BLOCK',
+                    blocked_reason='等待内容编辑修复', blocked_role='content_editor',
+                    blocked_action='修订后重试', blocked_at=updated_at
+                WHERE id='chun-xiao'
+                """
+            )
+        blocked = self.store.requirement_board(
+            stage="blocked",
+            risk="blocked",
+            responsible_role="content_editor",
+        )
+        self.assertEqual(blocked["total"], 1)
+        self.assertEqual(blocked["items"][0]["blocked_code"], "TEST_REQUIREMENT_BLOCK")
+
+        with self.assertRaises(WorkflowError) as invalid_stage:
+            self.store.requirement_board(stage="unknown")
+        self.assertEqual(invalid_stage.exception.code, "INVALID_REQUIREMENT_BOARD_STAGE")
+        with self.assertRaises(WorkflowError) as invalid_risk:
+            self.store.requirement_board(risk="unknown")
+        self.assertEqual(invalid_risk.exception.code, "INVALID_REQUIREMENT_BOARD_RISK")
+
     def test_poem_detail_returns_complete_trace_without_local_asset_paths(self):
         image, _ = self.final_candidate("shan-ju-qiu-ming", "d" * 32)
         detail = self.store.poem_detail("shan-ju-qiu-ming")

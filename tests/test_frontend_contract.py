@@ -96,11 +96,57 @@ class FrontendContractTests(unittest.TestCase):
         styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
         self.assertIn("requirement_generation_failures", script)
         self.assertIn("requirement_schema", script)
-        self.assertIn('["failed", "生成异常"]', script)
+        self.assertIn('["blocked", "阻塞"]', script)
         self.assertIn("自动修复", script)
         self.assertIn("requirement_generation_runs", script)
         self.assertIn("requirement-contract-line", script)
         self.assertIn("generation-error-note", styles)
+
+    def test_requirement_board_has_six_stages_filters_and_full_versioned_editor(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        for element_id in (
+            "requirement-search",
+            "requirement-author-filter",
+            "requirement-theme-filter",
+            "requirement-risk-filter",
+            "requirement-owner-filter",
+            "requirement-result-count",
+            "requirement-action-gate",
+            "requirement-evidence",
+            "requirement-confidence",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for element_id in (
+            "requirement-theme",
+            "requirement-mood",
+            "requirement-time-place",
+            "requirement-subject",
+            "requirement-imagery",
+            "requirement-composition",
+            "requirement-must",
+            "requirement-avoid",
+            "requirement-historical-risks",
+            "requirement-uncertainties",
+            "requirement-locked-fields",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for stage in (
+            "waiting_generation",
+            "generating",
+            "in_review",
+            "approved",
+            "rejected",
+            "blocked",
+        ):
+            self.assertIn(stage, script)
+        self.assertIn("function requirementBoardCard", script)
+        self.assertIn("function filteredRequirementBoardItems", script)
+        self.assertIn("requirement_board", script)
+        self.assertIn("requirement-board-column", styles)
+        self.assertIn("requirement-drawer", styles)
+        self.assertIn("requirement-lock-fields", styles)
 
     def test_exception_center_exposes_owned_actionable_records(self):
         html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")

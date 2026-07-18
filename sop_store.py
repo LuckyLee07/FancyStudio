@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -263,6 +264,21 @@ BLOCKER_ROLES = {
     "system_admin",
 }
 
+REQUIREMENT_BOARD_STAGES = {
+    "waiting_generation",
+    "generating",
+    "in_review",
+    "approved",
+    "rejected",
+    "blocked",
+}
+REQUIREMENT_BOARD_RISKS = {
+    "historical",
+    "low_confidence",
+    "blocked",
+    "clear",
+}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -336,10 +352,23 @@ class SopStore:
         )
         self.qc_policy_seed_path = self.poem_seed_path.parent / "qc_policy.json"
         self.lock = threading.RLock()
+        self.active_requirement_lock = threading.Lock()
+        self.active_requirement_poems: set[str] = set()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
         self._seed()
         self._recover_interrupted_work()
+
+    @contextmanager
+    def _track_requirement_generation(self, poem_ids: Iterable[str]):
+        tracked = {str(poem_id)[:80] for poem_id in poem_ids if str(poem_id)}
+        with self.active_requirement_lock:
+            self.active_requirement_poems.update(tracked)
+        try:
+            yield
+        finally:
+            with self.active_requirement_lock:
+                self.active_requirement_poems.difference_update(tracked)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -4062,6 +4091,272 @@ class SopStore:
             ).fetchall()
         return [self._requirement_dict(row) for row in rows]
 
+    def requirement_board(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        *,
+        stage: str | None = None,
+        author: str = "",
+        theme: str = "",
+        risk: str | None = None,
+        responsible_role: str | None = None,
+        query: str = "",
+        limit: int = 500,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Project every poem into one actionable requirement-review stage.
+
+        The board is deliberately poem-complete: records without a RequirementCard
+        remain visible, generation failures become owned blockers, and approved
+        requirements stay traceable after the poem has entered downstream stages.
+        """
+
+        if stage and stage not in REQUIREMENT_BOARD_STAGES:
+            raise WorkflowError(
+                "INVALID_REQUIREMENT_BOARD_STAGE",
+                "不支持的需求看板阶段。",
+            )
+        if risk and risk not in REQUIREMENT_BOARD_RISKS:
+            raise WorkflowError(
+                "INVALID_REQUIREMENT_BOARD_RISK",
+                "不支持的需求风险筛选。",
+            )
+        if responsible_role and responsible_role not in BLOCKER_ROLES:
+            raise WorkflowError(
+                "INVALID_RESPONSIBLE_ROLE",
+                "不支持的责任角色。",
+            )
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        author = str(author).strip()[:80]
+        theme = str(theme).strip()[:100]
+        query = str(query).strip().lower()[:100]
+
+        poems = self.list_poems(project_id, limit=500)["items"]
+        requirements = {
+            item["poem_id"]: item for item in self.requirements(project_id)
+        }
+        failures = {
+            item["poem_id"]: item
+            for item in self.requirement_generation_runs(
+                project_id,
+                status="failed",
+                unresolved_only=True,
+                limit=500,
+            )
+        }
+        with self._connect() as connection:
+            running_poems = {
+                row["poem_id"]
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT poem_id
+                    FROM requirement_generation_runs
+                    WHERE project_id = ? AND status = 'running'
+                      AND resolved_at IS NULL
+                    """,
+                    (project_id,),
+                ).fetchall()
+            }
+        with self.active_requirement_lock:
+            running_poems.update(self.active_requirement_poems)
+
+        items: list[dict[str, Any]] = []
+        for poem in poems:
+            requirement = requirements.get(poem["id"])
+            content = (requirement or {}).get("content") or {}
+            failure = failures.get(poem["id"])
+            if poem["status"] == "blocked" or failure:
+                board_stage = "blocked"
+            elif poem["id"] in running_poems:
+                board_stage = "generating"
+            elif requirement and requirement["status"] == "approved":
+                board_stage = "approved"
+            elif requirement and requirement["status"] == "rejected":
+                board_stage = "rejected"
+            elif requirement:
+                board_stage = "in_review"
+            else:
+                board_stage = "waiting_generation"
+
+            confidence = content.get("confidence") or {}
+            low_confidence_fields = [
+                field
+                for field, confidence_item in confidence.items()
+                if isinstance(confidence_item, dict)
+                and (
+                    confidence_item.get("level") == "low"
+                    or confidence_item.get("requires_review") is True
+                )
+            ]
+            historical_risks = [
+                str(item)
+                for item in (content.get("historical_risks") or [])
+                if str(item).strip()
+            ]
+            if board_stage == "blocked":
+                owner = poem.get("blocked_role") or "content_editor"
+            elif board_stage == "approved":
+                owner = "art_director"
+            else:
+                owner = "content_editor"
+            risk_tags = [*historical_risks]
+            risk_tags.extend(f"低置信度：{field}" for field in low_confidence_fields)
+            if board_stage == "blocked":
+                risk_tags.append(poem.get("blocked_code") or (failure or {}).get("error_code") or "需求阻塞")
+            risk_count = len(historical_risks) + len(low_confidence_fields)
+            if board_stage == "blocked" or risk_count >= 3:
+                risk_level = "high"
+            elif risk_count:
+                risk_level = "medium"
+            else:
+                risk_level = "clear"
+
+            can_generate = board_stage in {"waiting_generation", "blocked"} and poem[
+                "status"
+            ] in {"requirement_draft", "blocked"}
+            if poem["status"] in {"imported", "content_review"}:
+                missing_condition = "先批准当前内容与来源版本。"
+            elif board_stage == "generating":
+                missing_condition = "需求生成正在执行，请等待当前运行完成。"
+            elif board_stage == "approved":
+                missing_condition = "需求已批准并冻结；如需修改，先在审核流程中退回。"
+            elif board_stage == "blocked":
+                missing_condition = poem.get("blocked_reason") or (failure or {}).get(
+                    "error_message", "先处理需求生成异常。"
+                )
+            else:
+                missing_condition = ""
+            item = {
+                "id": f"requirement-board:{poem['id']}",
+                "stage": board_stage,
+                "poem_id": poem["id"],
+                "poem_title": poem["title"],
+                "author": poem["author"],
+                "dynasty": poem["dynasty"],
+                "poem_status": poem["status"],
+                "theme": content.get("theme") or poem.get("theme") or "未分类",
+                "mood": content.get("mood") or poem.get("mood") or "待补充",
+                "imagery": content.get("core_imagery") or poem.get("imagery") or [],
+                "scene": content.get("time_and_place") or "待补充时空环境",
+                "subject": content.get("subject") or "待明确画面主体",
+                "composition": content.get("composition") or "待生成画面构图倾向",
+                "historical_risks": historical_risks,
+                "low_confidence_fields": low_confidence_fields,
+                "risk_tags": risk_tags,
+                "risk_count": risk_count,
+                "risk_level": risk_level,
+                "responsible_role": owner,
+                "requirement": requirement,
+                "requirement_id": (requirement or {}).get("id"),
+                "requirement_status": (requirement or {}).get("status"),
+                "requirement_version": (requirement or {}).get("version"),
+                "failure": failure,
+                "blocked_code": poem.get("blocked_code") or "",
+                "blocked_reason": poem.get("blocked_reason") or "",
+                "blocked_action": poem.get("blocked_action") or "",
+                "can_generate": can_generate,
+                "can_edit": bool(requirement)
+                and board_stage not in {"approved", "generating"},
+                "can_review": bool(requirement)
+                and requirement.get("status") == "in_review",
+                "missing_condition": missing_condition,
+                "updated_at": (requirement or {}).get("updated_at")
+                or poem.get("updated_at"),
+            }
+            items.append(item)
+
+        facets = {
+            "authors": sorted({item["author"] for item in items}),
+            "themes": sorted({item["theme"] for item in items}),
+            "responsible_roles": sorted(
+                {item["responsible_role"] for item in items}
+            ),
+            "risks": sorted(REQUIREMENT_BOARD_RISKS),
+        }
+
+        def matches_non_stage(item: dict[str, Any]) -> bool:
+            if author and item["author"] != author:
+                return False
+            if theme and item["theme"] != theme:
+                return False
+            if responsible_role and item["responsible_role"] != responsible_role:
+                return False
+            if risk == "historical" and not item["historical_risks"]:
+                return False
+            if risk == "low_confidence" and not item["low_confidence_fields"]:
+                return False
+            if risk == "blocked" and item["stage"] != "blocked":
+                return False
+            if risk == "clear" and (
+                item["risk_count"] or item["stage"] == "blocked"
+            ):
+                return False
+            if query:
+                haystack = " ".join(
+                    [
+                        item["poem_title"],
+                        item["author"],
+                        item["theme"],
+                        item["mood"],
+                        item["scene"],
+                        item["subject"],
+                        item["composition"],
+                        " ".join(item["imagery"]),
+                        " ".join(item["risk_tags"]),
+                        item["blocked_reason"],
+                    ]
+                ).lower()
+                if query not in haystack:
+                    return False
+            return True
+
+        filtered_for_summary = [item for item in items if matches_non_stage(item)]
+        summary = {
+            "total": len(filtered_for_summary),
+            "by_stage": {
+                board_stage: sum(
+                    item["stage"] == board_stage for item in filtered_for_summary
+                )
+                for board_stage in REQUIREMENT_BOARD_STAGES
+            },
+            "at_risk": sum(
+                item["risk_count"] > 0 or item["stage"] == "blocked"
+                for item in filtered_for_summary
+            ),
+            "generated_at": utc_now(),
+        }
+        filtered = [
+            item
+            for item in filtered_for_summary
+            if not stage or item["stage"] == stage
+        ]
+        stage_order = {
+            "blocked": 0,
+            "in_review": 1,
+            "rejected": 2,
+            "waiting_generation": 3,
+            "generating": 4,
+            "approved": 5,
+        }
+        filtered.sort(
+            key=lambda item: (
+                stage_order[item["stage"]],
+                str(item["updated_at"] or ""),
+                item["poem_title"],
+            ),
+            reverse=False,
+        )
+        total = len(filtered)
+        return {
+            "items": filtered[offset : offset + limit],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "summary": summary,
+            "facets": facets,
+        }
+
     def requirement_generation_runs(
         self,
         project_id: str = DEFAULT_PROJECT_ID,
@@ -6169,7 +6464,9 @@ class SopStore:
         poem_ids: Iterable[str],
         direction_ids: Iterable[str] | None = None,
     ) -> list[sqlite3.Row]:
-        poem_ids = list(dict.fromkeys(str(item) for item in poem_ids))[:300]
+        poem_ids = list(
+            dict.fromkeys(str(item).strip() for item in poem_ids if str(item).strip())
+        )[:300]
         if not poem_ids:
             raise WorkflowError("EMPTY_SELECTION", "请至少选择一首待排产诗词。")
         poem_placeholders = ",".join("?" for _ in poem_ids)
@@ -9419,6 +9716,7 @@ class SopStore:
             "data_quality": self.data_quality_report(project_id),
             "poems": self.list_poems(project_id)["items"],
             "requirements": self.requirements(project_id),
+            "requirement_board": self.requirement_board(project_id),
             "requirement_generation_failures": self.requirement_generation_runs(
                 project_id,
                 status="failed",
@@ -9590,6 +9888,7 @@ class SopStore:
         preserve_locked: bool = True,
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        poem_ids = list(dict.fromkeys(str(item) for item in poem_ids))[:300]
         _, actor_role = self._actor(actor)
         if actor_role not in {"content_editor", "producer", "system_admin"}:
             raise WorkflowError(
@@ -9605,7 +9904,7 @@ class SopStore:
                 "项目没有已发布的全局 AI 指令。",
                 status=409,
             )
-        with self.lock, self._connect() as connection:
+        with self._track_requirement_generation(poem_ids), self.lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 poem_rows = self._poem_rows(connection, project_id, poem_ids)

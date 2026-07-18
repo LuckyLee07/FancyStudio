@@ -263,7 +263,19 @@
               </div>
             </div>
             <div class="board-tabs" id="requirement-tabs"></div>
-            <div class="card-grid requirement-grid" id="requirement-grid"></div>
+            <div class="requirement-board-toolbar" aria-label="需求板筛选">
+              <label class="search-field requirement-search">
+                <span aria-hidden="true">⌕</span>
+                <input id="requirement-search" type="search" placeholder="搜索诗名、作者、意象、场景或风险" />
+              </label>
+              <label class="filter-field"><span>作者</span><select id="requirement-author-filter"><option value="">全部作者</option></select></label>
+              <label class="filter-field"><span>题材</span><select id="requirement-theme-filter"><option value="">全部题材</option></select></label>
+              <label class="filter-field"><span>风险</span><select id="requirement-risk-filter"><option value="">全部风险</option><option value="historical">历史风险</option><option value="low_confidence">低置信度</option><option value="blocked">流程阻塞</option><option value="clear">无已知风险</option></select></label>
+              <label class="filter-field"><span>责任人</span><select id="requirement-owner-filter"><option value="">全部责任人</option><option value="content_editor">内容编辑</option><option value="art_director">美术指导</option><option value="producer">制片人</option><option value="ai_operator">AI 操作员</option><option value="system_admin">系统管理员</option></select></label>
+              <button class="secondary-button compact-button" id="clear-requirement-filters" type="button">清除筛选</button>
+              <span class="requirement-result-count" id="requirement-result-count">0 首</span>
+            </div>
+            <div class="requirement-board" id="requirement-grid" aria-live="polite"></div>
             <div class="empty-state" id="requirement-empty" hidden></div>
           </section>
 
@@ -756,46 +768,67 @@
       </form>
     </dialog>
 
-    <dialog class="detail-dialog" id="requirement-dialog">
+    <dialog class="detail-dialog requirement-drawer" id="requirement-dialog">
       <form method="dialog" class="dialog-shell" id="requirement-form">
         <header>
           <div>
-            <p class="eyebrow">REQUIREMENT DETAIL</p>
+            <p class="eyebrow">VERSIONED REQUIREMENT EDITOR</p>
             <h2 id="requirement-dialog-title">需求卡</h2>
           </div>
           <button class="icon-button" value="cancel" aria-label="关闭">×</button>
         </header>
         <input id="requirement-id" type="hidden" />
-        <div class="dialog-body">
+        <div class="dialog-body form-stack">
           <div class="dialog-meta" id="requirement-dialog-meta"></div>
-          <label>
-            <span>画面构图倾向</span>
-            <textarea id="requirement-composition" rows="3"></textarea>
-          </label>
+          <div class="requirement-action-gate" id="requirement-action-gate"></div>
+          <div class="dialog-columns">
+            <label><span>题材</span><input class="dialog-input" id="requirement-theme" maxlength="500" required /></label>
+            <label><span>情绪</span><input class="dialog-input" id="requirement-mood" maxlength="500" required /></label>
+          </div>
+          <label><span>时空 / 环境</span><textarea class="dialog-textarea" id="requirement-time-place" rows="2" maxlength="500" required></textarea></label>
+          <label><span>画面主体</span><textarea class="dialog-textarea" id="requirement-subject" rows="2" maxlength="500" required></textarea></label>
+          <label><span>核心意象 <small>每行一项</small></span><textarea class="dialog-textarea" id="requirement-imagery" rows="3" required></textarea></label>
+          <label><span>画面构图倾向</span><textarea class="dialog-textarea" id="requirement-composition" rows="3" maxlength="2000" required></textarea></label>
           <div class="dialog-columns">
             <label>
               <span>必须出现 <small>每行一项</small></span>
-              <textarea id="requirement-must" rows="6"></textarea>
+              <textarea class="dialog-textarea" id="requirement-must" rows="5" required></textarea>
             </label>
             <label>
               <span>禁止出现 <small>每行一项</small></span>
-              <textarea id="requirement-avoid" rows="6"></textarea>
+              <textarea class="dialog-textarea" id="requirement-avoid" rows="5" required></textarea>
             </label>
           </div>
-          <label>
-            <span>编辑备注</span>
-            <textarea id="requirement-note" rows="3"></textarea>
-          </label>
-          <label>
-            <span>重算锁定字段 <small>每行一个字段名</small></span>
-            <textarea id="requirement-locked-fields" rows="3" placeholder="composition&#10;must_have"></textarea>
-          </label>
+          <div class="dialog-columns">
+            <label><span>历史风险 <small>每行一项</small></span><textarea class="dialog-textarea" id="requirement-historical-risks" rows="5"></textarea></label>
+            <label><span>待确认问题 <small>每行一项</small></span><textarea class="dialog-textarea" id="requirement-uncertainties" rows="5"></textarea></label>
+          </div>
+          <label><span>编辑备注</span><textarea class="dialog-textarea" id="requirement-note" rows="3" maxlength="2000"></textarea></label>
+          <fieldset class="requirement-lock-fields" id="requirement-locked-fields">
+            <legend>重生成时锁定字段</legend>
+            <p>勾选后，AI 重算其他字段时会原样保留这些人工确认结果。</p>
+            <div>
+              <label><input type="checkbox" value="theme" />题材</label>
+              <label><input type="checkbox" value="mood" />情绪</label>
+              <label><input type="checkbox" value="time_and_place" />时空环境</label>
+              <label><input type="checkbox" value="subject" />主体</label>
+              <label><input type="checkbox" value="core_imagery" />核心意象</label>
+              <label><input type="checkbox" value="composition" />构图倾向</label>
+              <label><input type="checkbox" value="must_have" />必须出现</label>
+              <label><input type="checkbox" value="avoid" />禁止出现</label>
+              <label><input type="checkbox" value="historical_risks" />历史风险</label>
+              <label><input type="checkbox" value="uncertainties" />待确认问题</label>
+              <label><input type="checkbox" value="editor_note" />编辑备注</label>
+            </div>
+          </fieldset>
+          <section class="requirement-evidence-panel"><header><strong>诗意依据</strong><span>只读 · 绑定当前 ContentVersion</span></header><div id="requirement-evidence"></div></section>
+          <section class="requirement-confidence-panel"><header><strong>置信度与人工复核</strong><span>低置信度必须说明不确定点</span></header><div id="requirement-confidence"></div></section>
         </div>
         <footer>
-          <span>保存会创建新版本，历史版本不会被覆盖。</span>
+          <span>保存会创建新版本并重新进入待审核；历史版本不会被覆盖。</span>
           <div>
             <button class="secondary-button" value="cancel" type="button" data-close-dialog>取消</button>
-            <button class="primary-button" value="default" type="submit">保存新版本</button>
+            <button class="primary-button" id="save-requirement-version" value="default" type="submit">保存新版本</button>
           </div>
         </footer>
       </form>

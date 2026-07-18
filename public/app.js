@@ -11,6 +11,7 @@ const state = {
     summary: null,
     poems: [],
     requirements: [],
+    requirement_board: { items: [], total: 0, summary: {}, facets: {} },
     requirement_generation_failures: [],
     requirement_schema: null,
     directions: [],
@@ -48,6 +49,12 @@ const state = {
   poemQuery: "",
   poemStatus: "",
   requirementFilter: "all",
+  requirementQuery: "",
+  requirementAuthor: "",
+  requirementTheme: "",
+  requirementRisk: "",
+  requirementOwner: "",
+  generatingRequirements: new Set(),
   importPayload: null,
   importPreview: null,
   batchEstimate: null,
@@ -147,6 +154,15 @@ const requirementStatusMeta = {
   approved: ["已通过", "success"],
   rejected: ["已退回", "danger"],
   disabled: ["已停用", "neutral"],
+};
+
+const requirementBoardStageMeta = {
+  waiting_generation: ["待生成", "neutral", "先完成内容门禁，再生成结构化需求"],
+  generating: ["生成中", "running", "正在生成或校验 RequirementCard"],
+  in_review: ["待审核", "warning", "内容编辑核对诗意、画面约束与风险"],
+  approved: ["已通过", "success", "需求已冻结，移交美术方向策划"],
+  rejected: ["已退回", "danger", "根据退回原因修订并创建新版本"],
+  blocked: ["阻塞", "danger", "按错误证据与责任角色处理后重试"],
 };
 
 const directionTypeMeta = {
@@ -776,7 +792,7 @@ async function routeBlocker(item) {
     document.querySelector("#poem-status-filter").value = "blocked";
     renderPoemTable();
   } else if (view === "requirements" && filter === "failed") {
-    state.requirementFilter = "failed";
+    state.requirementFilter = "blocked";
     renderRequirements();
   }
   document.querySelector("#blocker-dialog").close();
@@ -878,24 +894,19 @@ function renderPoemTable() {
 }
 
 function renderRequirementTabs() {
-  const failurePoems = new Set(
-    (state.sop.requirement_generation_failures || []).map((item) => item.poem_id),
-  );
-  const counts = {
-    all: state.sop.requirements.length,
-    in_review: state.sop.requirements.filter((item) => item.status === "in_review").length,
-    approved: state.sop.requirements.filter((item) => item.status === "approved").length,
-    rejected: state.sop.requirements.filter((item) => item.status === "rejected").length,
-    missing: state.sop.poems.filter((poem) => !poem.requirement).length,
-    failed: failurePoems.size,
-  };
+  const filtered = filteredRequirementBoardItems({ ignoreStage: true });
+  const counts = { all: filtered.length };
+  Object.keys(requirementBoardStageMeta).forEach((stage) => {
+    counts[stage] = filtered.filter((item) => item.stage === stage).length;
+  });
   const tabs = [
     ["all", "全部"],
+    ["waiting_generation", "待生成"],
+    ["generating", "生成中"],
     ["in_review", "待审核"],
     ["approved", "已通过"],
     ["rejected", "已退回"],
-    ["failed", "生成异常"],
-    ["missing", "待生成"],
+    ["blocked", "阻塞"],
   ];
   document.querySelector("#requirement-tabs").innerHTML = tabs
     .map(
@@ -1039,44 +1050,177 @@ function missingRequirementCard(poem) {
     </article>`;
 }
 
-function renderRequirements() {
-  renderRequirementTabs();
-  let cards = [];
-  if (state.requirementFilter === "failed") {
-    const poemIds = [
-      ...new Set(
-        (state.sop.requirement_generation_failures || []).map((item) => item.poem_id),
-      ),
-    ];
-    cards = poemIds
-      .map((poemId) => {
-        const requirement = state.sop.requirements.find((item) => item.poem_id === poemId);
-        const poem = state.sop.poems.find((item) => item.id === poemId);
-        return requirement ? requirementCard(requirement) : poem ? missingRequirementCard(poem) : "";
-      })
-      .filter(Boolean);
-  } else if (state.requirementFilter === "missing") {
-    cards = state.sop.poems
-      .filter((poem) => !poem.requirement)
-      .map(missingRequirementCard);
-  } else {
-    cards = state.sop.requirements
-      .filter(
-        (item) =>
-          state.requirementFilter === "all" ||
-          item.status === state.requirementFilter,
-      )
-      .map(requirementCard);
-    if (state.requirementFilter === "all") {
-      cards.push(
-        ...state.sop.poems
-          .filter((poem) => !poem.requirement)
-          .slice(0, 12)
-          .map(missingRequirementCard),
-      );
-    }
+function requirementBoardItems() {
+  return (state.sop.requirement_board?.items || []).map((item) =>
+    state.generatingRequirements.has(item.poem_id)
+      ? { ...item, stage: "generating", responsible_role: "content_editor" }
+      : item,
+  );
+}
+
+function filteredRequirementBoardItems({ ignoreStage = false } = {}) {
+  const query = state.requirementQuery.trim().toLowerCase();
+  const stageFilter = state.requirementFilter === "failed" ? "blocked" : state.requirementFilter;
+  return requirementBoardItems().filter((item) => {
+    if (!ignoreStage && stageFilter !== "all" && item.stage !== stageFilter) return false;
+    if (state.requirementAuthor && item.author !== state.requirementAuthor) return false;
+    if (state.requirementTheme && item.theme !== state.requirementTheme) return false;
+    if (state.requirementOwner && item.responsible_role !== state.requirementOwner) return false;
+    if (state.requirementRisk === "historical" && !(item.historical_risks || []).length) return false;
+    if (state.requirementRisk === "low_confidence" && !(item.low_confidence_fields || []).length) return false;
+    if (state.requirementRisk === "blocked" && item.stage !== "blocked") return false;
+    if (
+      state.requirementRisk === "clear" &&
+      (item.risk_count || item.stage === "blocked")
+    ) return false;
+    if (!query) return true;
+    const haystack = [
+      item.poem_title,
+      item.author,
+      item.theme,
+      item.mood,
+      item.scene,
+      item.subject,
+      item.composition,
+      ...(item.imagery || []),
+      ...(item.risk_tags || []),
+      item.blocked_reason,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function syncRequirementFacetOptions() {
+  const facets = state.sop.requirement_board?.facets || {};
+  const author = document.querySelector("#requirement-author-filter");
+  const theme = document.querySelector("#requirement-theme-filter");
+  author.innerHTML = '<option value="">全部作者</option>' + (facets.authors || [])
+    .map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`)
+    .join("");
+  theme.innerHTML = '<option value="">全部题材</option>' + (facets.themes || [])
+    .map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`)
+    .join("");
+  author.value = state.requirementAuthor;
+  theme.value = state.requirementTheme;
+  document.querySelector("#requirement-risk-filter").value = state.requirementRisk;
+  document.querySelector("#requirement-owner-filter").value = state.requirementOwner;
+  document.querySelector("#requirement-search").value = state.requirementQuery;
+}
+
+function requirementBoardActions(item) {
+  const requirement = item.requirement;
+  if (item.stage === "generating") {
+    return '<span class="requirement-running-note"><i></i>正在生成与校验…</span>';
   }
-  document.querySelector("#requirement-grid").innerHTML = cards.join("");
+  if (item.stage === "waiting_generation") {
+    const disabled = item.can_generate ? "" : "disabled";
+    return `<label class="select-card" data-role-allow="content_editor,producer,system_admin" title="${escapeHtml(item.missing_condition || "选择后可批量生成")}">
+      <input type="checkbox" data-select-poem="${item.poem_id}" ${
+        state.selectedPoems.has(item.poem_id) ? "checked" : ""
+      } ${disabled} /><span>批量</span></label>
+      <button class="approve-button" type="button" data-role-allow="content_editor,producer,system_admin" data-poem-action="generate-requirement" data-poem-id="${item.poem_id}" ${disabled} title="${escapeHtml(
+        item.missing_condition || "生成结构化需求",
+      )}">✦ 生成需求</button>`;
+  }
+  if (item.stage === "in_review" && requirement) {
+    return `<button class="card-link" type="button" data-requirement-action="edit" data-requirement-id="${requirement.id}">查看详情</button>
+      <span class="requirement-review-actions" data-role-allow="content_editor,producer,system_admin"><label class="select-card"><input type="checkbox" data-select-requirement="${requirement.id}" ${
+      state.selectedRequirements.has(requirement.id) ? "checked" : ""
+    } /><span>批量</span></label>
+      <button class="danger-button" type="button" data-requirement-action="reject" data-requirement-id="${requirement.id}">退回</button>
+      <button class="approve-button" type="button" data-requirement-action="approve" data-requirement-id="${requirement.id}">通过</button></span>`;
+  }
+  if (item.stage === "approved" && requirement) {
+    return `<button class="card-link" type="button" data-requirement-action="edit" data-requirement-id="${requirement.id}">查看冻结版</button>${
+      item.poem_status === "direction_draft"
+        ? `<button class="approve-button" type="button" data-role-allow="art_director,producer,system_admin" data-poem-action="generate-direction" data-poem-id="${item.poem_id}">生成三方向</button>`
+        : '<span class="requirement-handoff-note">已移交下游</span>'
+    }`;
+  }
+  if (item.stage === "rejected" && requirement) {
+    return `<button class="primary-button" type="button" data-role-allow="content_editor,producer,system_admin" data-requirement-action="edit" data-requirement-id="${requirement.id}">修订新版本</button>
+      <button class="card-link" type="button" data-role-allow="content_editor,producer,system_admin" data-regenerate-requirement="${item.poem_id}">重算未锁字段</button>`;
+  }
+  const retry = item.can_generate
+    ? `<button class="approve-button" type="button" data-role-allow="content_editor,producer,system_admin" data-poem-action="generate-requirement" data-poem-id="${item.poem_id}">修正后重试</button>`
+    : "";
+  return `<button class="card-link" type="button" data-open-poem-detail="${item.poem_id}">查看阻塞证据</button>${retry}`;
+}
+
+function requirementBoardCard(item) {
+  const meta = requirementBoardStageMeta[item.stage] || requirementBoardStageMeta.waiting_generation;
+  const risks = (item.risk_tags || []).slice(0, 3);
+  const requirement = item.requirement;
+  return `<article class="requirement-board-card stage-${item.stage} risk-${item.risk_level}" data-requirement-poem="${item.poem_id}">
+    <header>
+      <div><span>${escapeHtml(item.theme)} · ${escapeHtml(item.mood)}</span><h4>${escapeHtml(
+        item.poem_title,
+      )}</h4><small>${escapeHtml(item.dynasty)} · ${escapeHtml(item.author)}</small></div>
+      ${requirement ? `<em>v${requirement.version}</em>` : ""}
+    </header>
+    <div class="requirement-board-owner"><span>${escapeHtml(
+      roleLabels[item.responsible_role] || item.responsible_role,
+    )}</span><small>${escapeHtml(meta[2])}</small></div>
+    <dl class="requirement-board-brief">
+      <div><dt>主体</dt><dd>${escapeHtml(item.subject)}</dd></div>
+      <div><dt>环境</dt><dd>${escapeHtml(item.scene)}</dd></div>
+    </dl>
+    <div class="requirement-board-imagery">${(item.imagery || []).slice(0, 4)
+      .map((value) => `<i>${escapeHtml(value)}</i>`)
+      .join("") || "<i>待提取意象</i>"}</div>
+    <div class="requirement-board-risks ${risks.length ? "has-risk" : ""}">
+      ${
+        risks.length
+          ? risks.map((value) => `<span>${escapeHtml(value)}</span>`).join("")
+          : "<span>无已知风险</span>"
+      }
+    </div>
+    ${
+      item.stage === "blocked"
+        ? `<p class="requirement-board-blocker"><code>${escapeHtml(
+            item.blocked_code || item.failure?.error_code || "REQUIREMENT_BLOCKED",
+          )}</code>${escapeHtml(item.blocked_reason || item.failure?.error_message || "需求生成被阻塞。")}</p>`
+        : ""
+    }
+    ${
+      requirement?.rejection_reason
+        ? `<p class="requirement-board-rejection">退回：${escapeHtml(requirement.rejection_reason)}</p>`
+        : ""
+    }
+    <footer><small>更新 ${formatDate(item.updated_at)}</small><div>${requirementBoardActions(
+      item,
+    )}</div></footer>
+  </article>`;
+}
+
+function renderRequirementColumn(stage, items) {
+  const meta = requirementBoardStageMeta[stage];
+  return `<section class="requirement-board-column stage-${stage}" data-requirement-stage="${stage}">
+    <header><div><i></i><strong>${meta[0]}</strong></div><span>${items.length}</span></header>
+    <p>${meta[2]}</p>
+    <div>${
+      items.length
+        ? items.map(requirementBoardCard).join("")
+        : '<div class="requirement-column-empty">当前筛选下无记录</div>'
+    }</div>
+  </section>`;
+}
+
+function renderRequirements() {
+  syncRequirementFacetOptions();
+  renderRequirementTabs();
+  const items = filteredRequirementBoardItems();
+  const stages =
+    state.requirementFilter === "all"
+      ? Object.keys(requirementBoardStageMeta)
+      : [state.requirementFilter === "failed" ? "blocked" : state.requirementFilter];
+  document.querySelector("#requirement-grid").innerHTML = stages
+    .map((stage) => renderRequirementColumn(stage, items.filter((item) => item.stage === stage)))
+    .join("");
+  document.querySelector("#requirement-result-count").textContent = `${items.length} 首`;
   document.querySelector("#requirement-selection-count").textContent =
     state.selectedRequirements.size
       ? `已选择 ${state.selectedRequirements.size} 条待审核需求`
@@ -1086,8 +1230,8 @@ function renderRequirements() {
   document.querySelector("#bulk-reject-requirements").disabled =
     state.selectedRequirements.size === 0;
   const empty = document.querySelector("#requirement-empty");
-  empty.hidden = cards.length > 0;
-  empty.innerHTML = "<strong>当前分组没有需求卡</strong><p>调整筛选，或选择诗词生成新需求。</p>";
+  empty.hidden = items.length > 0;
+  empty.innerHTML = "<strong>当前筛选没有需求记录</strong><p>清除筛选，或回到待生成列选择诗词。</p>";
   applyRoleVisibility();
 }
 
@@ -2875,6 +3019,8 @@ function selectedIdsOrWarn() {
 
 async function generateRequirements(poemIds) {
   if (!poemIds.length) return;
+  poemIds.forEach((poemId) => state.generatingRequirements.add(poemId));
+  renderRequirements();
   setSyncState("loading", `正在生成 ${poemIds.length} 首需求`);
   try {
     const result = await api("/api/requirements/generate", {
@@ -2894,11 +3040,16 @@ async function generateRequirements(poemIds) {
   } catch (error) {
     setSyncState("error", "需求生成失败");
     showToast(error.message, "error");
+  } finally {
+    poemIds.forEach((poemId) => state.generatingRequirements.delete(poemId));
+    renderRequirements();
   }
 }
 
 async function regenerateRequirement(poemId) {
   if (!window.confirm("将创建新需求版本，只保留已锁字段，并使旧画面方向退出新排产。确认继续？")) return;
+  state.generatingRequirements.add(poemId);
+  renderRequirements();
   try {
     const result = await api("/api/requirements/generate", {
       method: "POST",
@@ -2918,6 +3069,9 @@ async function regenerateRequirement(poemId) {
     );
   } catch (error) {
     showToast(error.message, "error");
+  } finally {
+    state.generatingRequirements.delete(poemId);
+    renderRequirements();
   }
 }
 
@@ -3265,20 +3419,71 @@ function openRequirement(poemId) {
     <span>版本 v${requirement.version}</span>
     <span>${escapeHtml(requirement.author)}</span>
     <span>更新于 ${formatDate(requirement.updated_at)}</span>`;
+  document.querySelector("#requirement-theme").value = content.theme || "";
+  document.querySelector("#requirement-mood").value = content.mood || "";
+  document.querySelector("#requirement-time-place").value = content.time_and_place || "";
+  document.querySelector("#requirement-subject").value = content.subject || "";
+  document.querySelector("#requirement-imagery").value = (content.core_imagery || []).join("\n");
   document.querySelector("#requirement-composition").value =
     content.composition || "";
   document.querySelector("#requirement-must").value = (content.must_have || []).join("\n");
   document.querySelector("#requirement-avoid").value = (content.avoid || []).join("\n");
-  document.querySelector("#requirement-note").value = content.editor_note || "";
-  document.querySelector("#requirement-locked-fields").value = (
-    content.locked_fields || []
+  document.querySelector("#requirement-historical-risks").value = (
+    content.historical_risks || []
   ).join("\n");
+  document.querySelector("#requirement-uncertainties").value = (
+    content.uncertainties || []
+  ).join("\n");
+  document.querySelector("#requirement-note").value = content.editor_note || "";
+  const lockedFields = new Set(content.locked_fields || []);
+  document
+    .querySelectorAll('#requirement-locked-fields input[type="checkbox"]')
+    .forEach((field) => {
+      field.checked = lockedFields.has(field.value);
+    });
+  document.querySelector("#requirement-evidence").innerHTML = (content.evidence || [])
+    .map(
+      (item) => `<article><blockquote>${escapeHtml(item.quote || "未提供引用")}</blockquote><div><span>${escapeHtml(
+        item.source || "unknown",
+      )}</span>${(item.supports || []).map((field) => `<i>${escapeHtml(field)}</i>`).join("")}</div></article>`,
+    )
+    .join("") || '<p class="muted-value">当前版本没有可展示的证据。</p>';
+  const confidenceLabels = {
+    time_and_place: "时空环境",
+    subject: "画面主体",
+    composition: "构图倾向",
+    historical_risks: "历史风险",
+  };
+  document.querySelector("#requirement-confidence").innerHTML = Object.entries(
+    content.confidence || {},
+  )
+    .map(
+      ([field, item]) => `<article class="confidence-${escapeHtml(item.level || "low")}"><div><strong>${escapeHtml(
+        confidenceLabels[field] || field,
+      )}</strong><span>${Math.round(Number(item.score || 0) * 100)}% · ${
+        item.requires_review ? "需人工复核" : "已可判断"
+      }</span></div><div class="confidence-track"><i style="width:${Math.max(
+        0,
+        Math.min(100, Number(item.score || 0) * 100),
+      )}%"></i></div><p>${escapeHtml(item.basis || "未说明置信依据")}</p></article>`,
+    )
+    .join("") || '<p class="muted-value">当前版本没有置信度说明。</p>';
   const form = document.querySelector("#requirement-form");
-  const locked = requirement.status === "approved";
-  form.querySelectorAll("textarea").forEach((field) => {
+  const approvedLocked = requirement.status === "approved";
+  const roleLocked = !["content_editor", "producer", "system_admin"].includes(ACTOR.role);
+  const locked = approvedLocked || roleLocked;
+  document.querySelector("#requirement-action-gate").className = `requirement-action-gate ${
+    locked ? "is-locked" : "is-editable"
+  }`;
+  document.querySelector("#requirement-action-gate").innerHTML = approvedLocked
+    ? "<strong>已批准版本已冻结</strong><p>不能直接覆盖。若业务上必须修改，请在流程中退回后再创建新版本。</p>"
+    : roleLocked
+      ? `<strong>${escapeHtml(roleLabels[ACTOR.role] || ACTOR.role)}为只读视图</strong><p>需求修订由内容编辑、制片人或系统管理员执行；服务端会再次校验角色。</p>`
+    : "<strong>可创建修订版本</strong><p>保存后当前版本退出排产，新版本回到待审核列；证据和置信度保持只读。</p>";
+  form.querySelectorAll('textarea, input:not([type="hidden"])').forEach((field) => {
     field.disabled = locked;
   });
-  form.querySelector('button[type="submit"]').hidden = locked;
+  document.querySelector("#save-requirement-version").hidden = locked;
   document.querySelector("#requirement-dialog").showModal();
 }
 
@@ -3290,13 +3495,26 @@ async function saveRequirement(event) {
       method: "PATCH",
       body: JSON.stringify({
         changes: {
+          theme: document.querySelector("#requirement-theme").value.trim(),
+          mood: document.querySelector("#requirement-mood").value.trim(),
+          time_and_place: document.querySelector("#requirement-time-place").value.trim(),
+          subject: document.querySelector("#requirement-subject").value.trim(),
+          core_imagery: asLines(document.querySelector("#requirement-imagery").value),
           composition: document.querySelector("#requirement-composition").value.trim(),
           must_have: asLines(document.querySelector("#requirement-must").value),
           avoid: asLines(document.querySelector("#requirement-avoid").value),
-          editor_note: document.querySelector("#requirement-note").value.trim(),
-          locked_fields: asLines(
-            document.querySelector("#requirement-locked-fields").value,
+          historical_risks: asLines(
+            document.querySelector("#requirement-historical-risks").value,
           ),
+          uncertainties: asLines(
+            document.querySelector("#requirement-uncertainties").value,
+          ),
+          editor_note: document.querySelector("#requirement-note").value.trim(),
+          locked_fields: [
+            ...document.querySelectorAll(
+              '#requirement-locked-fields input[type="checkbox"]:checked',
+            ),
+          ].map((field) => field.value),
         },
         actor: ACTOR,
       }),
@@ -4374,6 +4592,36 @@ document.querySelector("#poem-status-filter").addEventListener("change", (event)
   renderPoemTable();
 });
 
+document.querySelector("#requirement-search").addEventListener("input", (event) => {
+  state.requirementQuery = event.target.value;
+  renderRequirements();
+});
+document.querySelector("#requirement-author-filter").addEventListener("change", (event) => {
+  state.requirementAuthor = event.target.value;
+  renderRequirements();
+});
+document.querySelector("#requirement-theme-filter").addEventListener("change", (event) => {
+  state.requirementTheme = event.target.value;
+  renderRequirements();
+});
+document.querySelector("#requirement-risk-filter").addEventListener("change", (event) => {
+  state.requirementRisk = event.target.value;
+  renderRequirements();
+});
+document.querySelector("#requirement-owner-filter").addEventListener("change", (event) => {
+  state.requirementOwner = event.target.value;
+  renderRequirements();
+});
+document.querySelector("#clear-requirement-filters").addEventListener("click", () => {
+  state.requirementFilter = "all";
+  state.requirementQuery = "";
+  state.requirementAuthor = "";
+  state.requirementTheme = "";
+  state.requirementRisk = "";
+  state.requirementOwner = "";
+  renderRequirements();
+});
+
 let queueSearchTimer = null;
 document.querySelector("#queue-task-search").addEventListener("input", (event) => {
   state.queueTaskQuery = event.target.value.trim();
@@ -4395,6 +4643,9 @@ document.querySelector("#queue-error-filter").addEventListener("change", (event)
 
 document.querySelector("#refresh-button").addEventListener("click", () => loadData());
 document.querySelector("#current-role").addEventListener("change", (event) => {
+  if (document.querySelector("#requirement-dialog").open) {
+    document.querySelector("#requirement-dialog").close();
+  }
   ACTOR.role = event.target.value;
   ACTOR.id = `local-${ACTOR.role}`;
   localStorage.setItem("tang-sop-role", ACTOR.role);

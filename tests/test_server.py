@@ -171,6 +171,53 @@ class TangPoemStudioTests(unittest.TestCase):
         _, backups = self.request_json("/api/backups")
         self.assertEqual(backups["items"][0]["name"], backup_name)
 
+    def test_requirement_board_api_filters_stages_risks_and_owners(self):
+        status, waiting = self.request_json(
+            "/api/requirement-board?stage=waiting_generation&author=%E6%9D%8E%E7%99%BD"
+        )
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(waiting["total"], 1)
+        self.assertTrue(
+            all(item["stage"] == "waiting_generation" for item in waiting["items"])
+        )
+        self.assertTrue(all(item["author"] == "李白" for item in waiting["items"]))
+        self.assertIn("content_editor", waiting["facets"]["responsible_roles"])
+
+        actor = {"id": "editor-board", "role": "content_editor"}
+        status, generated = self.request_json(
+            "/api/requirements/generate",
+            method="POST",
+            payload={
+                "project_id": server.SOP_DEFAULT_PROJECT_ID,
+                "poem_ids": ["jing-ye-si"],
+                "actor": actor,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(generated["succeeded"], 1)
+
+        status, review = self.request_json(
+            "/api/requirement-board?stage=in_review&responsible_role=content_editor&q=%E9%9D%99%E5%A4%9C%E6%80%9D"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(review["total"], 1)
+        item = review["items"][0]
+        self.assertEqual(item["poem_id"], "jing-ye-si")
+        self.assertTrue(item["can_review"])
+        self.assertIn("historical_risks", item)
+        self.assertIn("by_stage", review["summary"])
+
+        status, error = self.request_json_error(
+            "/api/requirement-board?stage=unknown"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "INVALID_REQUIREMENT_BOARD_STAGE")
+        status, error = self.request_json_error(
+            "/api/requirement-board?risk=unknown"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(error["code"], "INVALID_REQUIREMENT_BOARD_RISK")
+
     def test_direction_schema_diversity_and_run_trace_endpoints(self):
         status, schema = self.request_json("/api/schemas/direction-proposal")
         self.assertEqual(status, 200)

@@ -63,7 +63,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -1658,6 +1658,33 @@ class StudioHandler(BaseHTTPRequestHandler):
                     )
                 }
             )
+            return
+        if path == "/api/requirement-board":
+            try:
+                self._send_json(
+                    get_sop_store().requirement_board(
+                        query.get("project_id", [SOP_DEFAULT_PROJECT_ID])[0],
+                        stage=query.get("stage", [None])[0],
+                        author=query.get("author", [""])[0],
+                        theme=query.get("theme", [""])[0],
+                        risk=query.get("risk", [None])[0],
+                        responsible_role=query.get("responsible_role", [None])[0],
+                        query=query.get("q", [""])[0],
+                        limit=int(query.get("limit", ["500"])[0]),
+                        offset=int(query.get("offset", ["0"])[0]),
+                    )
+                )
+            except (WorkflowError, ValueError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {
+                            "code": "INVALID_REQUIREMENT_BOARD_QUERY",
+                            "message": "需求看板筛选或分页参数无效。",
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
             return
         if path == "/api/schemas/requirement-card":
             self._send_json(requirement_schema_document())
