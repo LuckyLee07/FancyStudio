@@ -54,6 +54,7 @@ const state = {
   currentImageId: null,
   currentPoemId: null,
   currentPoemSource: null,
+  currentPoemDetail: null,
   reviewSelection: new Set(),
   reviewShowBlocked: false,
   assetQuery: "",
@@ -1646,6 +1647,9 @@ function renderResources() {
   const topDataIssues = Object.entries(dataQuality.issue_counts || {})
     .sort((left, right) => right[1] - left[1])
     .slice(0, 6);
+  const qualityItems = (dataQuality.items || [])
+    .filter((item) => (item.issue_codes || []).length)
+    .slice(0, 8);
   const budget = state.sop.budget || {};
   const hardLimit = Number(budget.hard_limit || 0);
   const spent = Number(budget.spent || 0);
@@ -1803,6 +1807,27 @@ function renderResources() {
               .join("")
           : "<span class=\"quality-clear\">当前入库数据没有质量问题。</span>"}
       </div>
+      ${qualityItems.length
+        ? `<div class="quality-record-list">${qualityItems
+            .map(
+              (item) => `<article class="${item.blocking_issue_count ? "is-blocking" : ""}">
+                <button type="button" data-open-poem-detail="${escapeHtml(item.poem_id)}"><strong>${escapeHtml(
+                  item.title,
+                )}</strong><small>${escapeHtml(item.author)} · ContentVersion ${escapeHtml(
+                  item.content_version || "—",
+                )}</small></button>
+                <div>${(item.issue_codes || [])
+                  .slice(0, 3)
+                  .map((code) => `<span>${escapeHtml(dataIssueLabels[code] || code)}</span>`)
+                  .join("")}</div>
+                <aside data-role-allow="content_editor,producer,system_admin">
+                  <button class="text-link" type="button" data-edit-poem-content="${escapeHtml(item.poem_id)}">修订内容</button>
+                  <button class="text-link" type="button" data-edit-poem-source="${escapeHtml(item.poem_id)}">核验来源</button>
+                </aside>
+              </article>`,
+            )
+            .join("")}</div>`
+        : ""}
       <div class="import-template-actions">
         <button class="primary-button" type="button" data-open-poem-import>导入 / 补充诗词</button>
         <a class="secondary-button" href="/api/templates/poem-import?format=csv" download>CSV 模板</a>
@@ -1965,6 +1990,7 @@ async function openPoemDetail(poemId) {
     const currentSource = (detail.sources || []).find((item) => item.is_current) || null;
     state.currentPoemId = poem.id;
     state.currentPoemSource = currentSource;
+    state.currentPoemDetail = detail;
     const counts = detail.counts || {};
     document.querySelector("#poem-detail-title").textContent = `${poem.title} · 全链路详情`;
     const latestRequirement = detail.requirements.find((item) => item.is_current);
@@ -1974,6 +2000,7 @@ async function openPoemDetail(poemId) {
     const latestDirectionRun = directionRuns[0];
     const currentDirections = detail.directions.filter((item) => item.is_current);
     const currentAsset = detail.final_assets.find((item) => item.is_current);
+    const currentContent = detail.content_versions[0] || null;
     content.innerHTML = `
       <section class="poem-detail-hero">
         <div><span>${escapeHtml(poem.dynasty)} · ${escapeHtml(poem.author)} · ${escapeHtml(poem.theme || "未分类")}</span><h3>${escapeHtml(poem.title)}</h3><p>${(poem.lines || []).map(escapeHtml).join("<br>")}</p></div>
@@ -1999,7 +2026,15 @@ async function openPoemDetail(poemId) {
       <section class="poem-chain-grid">
         <article>
           <header><span>S1</span><div><strong>内容与需求</strong><small>版本冻结与证据</small></div></header>
-          <p>内容 v${detail.content_versions[0]?.version || "—"} · ${escapeHtml(detail.content_versions[0]?.status || "缺失")}</p>
+          <div class="content-version-summary">
+            <div><strong>ContentVersion ${currentContent ? `v${currentContent.version}` : "缺失"}</strong><small>${escapeHtml(
+              currentContent?.status || "missing",
+            )} · 来源 ${escapeHtml(currentContent?.source_version_id || "未绑定")}</small></div>
+            <button class="secondary-button" type="button" data-role-allow="content_editor,producer,system_admin" data-edit-poem-content="${escapeHtml(
+              poem.id,
+            )}">修订内容</button>
+          </div>
+          ${currentContent?.change_summary ? `<p class="content-change-note">本版说明：${escapeHtml(currentContent.change_summary)}</p>` : ""}
           <div class="poem-source-summary ${currentSource?.verification_status === "verified" ? "is-verified" : "is-blocked"}">
             <div><strong>${escapeHtml(currentSource?.citation || "来源未录入")}</strong><small>${escapeHtml(
               sourceTypeLabels[currentSource?.source_type] || currentSource?.source_type || "待确认",
@@ -2010,6 +2045,14 @@ async function openPoemDetail(poemId) {
               poem.id,
             )}">${currentSource ? "修订来源" : "补录来源"}</button>
           </div>
+          <div class="content-version-history">${detail.content_versions
+            .slice(0, 4)
+            .map(
+              (item) => `<span class="${item.id === currentContent?.id ? "is-current" : ""}"><strong>v${item.version}</strong><small>${escapeHtml(
+                item.status,
+              )} · ${formatDate(item.created_at)}</small></span>`,
+            )
+            .join("")}</div>
           <p>需求 ${latestRequirement ? `v${latestRequirement.version} · ${escapeHtml(latestRequirement.status)}` : "尚未生成"}</p>
           <p>${latestRequirementRun ? `${escapeHtml(latestRequirementRun.schema_version)} · ${escapeHtml(latestRequirementRun.status)} · 修复 ${latestRequirementRun.repair_attempts || 0}/1` : "尚无需求生成运行记录"}</p>
           ${latestRequirementRun?.error_code ? `<small class="error-code">${escapeHtml(latestRequirementRun.error_code)} · ${escapeHtml(latestRequirementRun.error_message)}</small>` : ""}
@@ -2059,9 +2102,90 @@ async function openPoemDetail(poemId) {
   }
 }
 
-function openSourceDialog(poemId) {
+async function poemDetailForEditing(poemId) {
+  if (state.currentPoemId === poemId && state.currentPoemDetail) {
+    return state.currentPoemDetail;
+  }
+  const detail = await api(`/api/poems/${poemId}`);
+  state.currentPoemId = poemId;
+  state.currentPoemDetail = detail;
+  state.currentPoemSource = (detail.sources || []).find((item) => item.is_current) || null;
+  return detail;
+}
+
+async function openContentDialog(poemId) {
+  try {
+    const detail = await poemDetailForEditing(poemId);
+    const poem = detail.poem;
+    const content = detail.content_versions?.[0] || poem;
+    const form = document.querySelector("#content-form");
+    form.reset();
+    form.elements.poem_id.value = poemId;
+    form.elements.title.value = content.title || poem.title || "";
+    form.elements.author.value = content.author || poem.author || "";
+    form.elements.dynasty.value = content.dynasty || poem.dynasty || "唐";
+    form.elements.lines.value = (content.lines || poem.lines || []).join("\n");
+    form.elements.theme.value = content.theme || poem.theme || "";
+    form.elements.mood.value = content.mood || poem.mood || "";
+    form.elements.imagery.value = (content.imagery || poem.imagery || []).join("\n");
+    form.elements.notes.value = content.notes || "";
+    document.querySelector("#content-dialog-title").textContent = `${poem.title} · v${Number(
+      content.version || 0,
+    ) + 1} 内容修订`;
+    document.querySelector("#poem-detail-dialog")?.close();
+    document.querySelector("#content-dialog").showModal();
+    applyRoleVisibility();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function submitPoemContent(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const poemId = form.elements.poem_id.value;
+  try {
+    const result = await api(`/api/poems/${poemId}/content/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: {
+          title: form.elements.title.value.trim(),
+          author: form.elements.author.value.trim(),
+          dynasty: form.elements.dynasty.value.trim(),
+          lines: asLines(form.elements.lines.value),
+          theme: form.elements.theme.value.trim(),
+          mood: form.elements.mood.value.trim(),
+          imagery: asLines(form.elements.imagery.value),
+          notes: form.elements.notes.value.trim(),
+          change_summary: form.elements.change_summary.value.trim(),
+        },
+        actor: ACTOR,
+      }),
+    });
+    document.querySelector("#content-dialog").close();
+    state.currentPoemDetail = null;
+    await refreshSop(
+      `ContentVersion v${result.content_version.version} 已创建；${result.invalidated.requirements} 个需求、${result.invalidated.directions} 个方向退出当前排产。`,
+    );
+    await openPoemDetail(poemId);
+  } catch (error) {
+    showToast(
+      error.message,
+      error.code === "CONTENT_REVISION_ACTIVE_TASKS" ? "warning" : "error",
+    );
+  }
+}
+
+async function openSourceDialog(poemId) {
+  let detail;
+  try {
+    detail = await poemDetailForEditing(poemId);
+  } catch (error) {
+    showToast(error.message, "error");
+    return;
+  }
   const poem = poemById(poemId);
-  const source = state.currentPoemId === poemId ? state.currentPoemSource || {} : {};
+  const source = (detail.sources || []).find((item) => item.is_current) || {};
   const form = document.querySelector("#source-form");
   form.reset();
   form.elements.poem_id.value = poemId;
@@ -2100,6 +2224,7 @@ async function submitPoemSource(event) {
       }),
     });
     document.querySelector("#source-dialog").close();
+    state.currentPoemDetail = null;
     await refreshSop("来源版本已保存，质量报告已同步重算。");
     await openPoemDetail(poemId);
   } catch (error) {
@@ -2696,6 +2821,35 @@ async function approveContent(poemId) {
       body: JSON.stringify({ actor: ACTOR }),
     });
     await refreshSop("内容已批准，可以生成插图需求。");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function bulkApproveContent() {
+  const poemIds = [...state.selectedPoems];
+  if (!poemIds.length) {
+    showToast("请先选择待审核诗词。", "warning");
+    return;
+  }
+  if (
+    !window.confirm(
+      `确认批量批准 ${poemIds.length} 首诗的当前内容版本与来源？不符合门禁的记录会单独保留失败原因。`,
+    )
+  ) {
+    return;
+  }
+  try {
+    const result = await api("/api/poems/content/bulk-approve", {
+      method: "POST",
+      body: JSON.stringify({ poem_ids: poemIds, actor: ACTOR }),
+    });
+    state.selectedPoems.clear();
+    await refreshSop();
+    showToast(
+      `内容批准完成：${result.succeeded} 首通过${result.failed ? `，${result.failed} 首未通过门禁` : ""}。`,
+      result.failed ? "warning" : "success",
+    );
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -3786,6 +3940,9 @@ document.addEventListener("click", (event) => {
   const editPoemSource = event.target.closest("[data-edit-poem-source]");
   if (editPoemSource) openSourceDialog(editPoemSource.dataset.editPoemSource);
 
+  const editPoemContent = event.target.closest("[data-edit-poem-content]");
+  if (editPoemContent) openContentDialog(editPoemContent.dataset.editPoemContent);
+
   if (event.target.closest("[data-open-poem-import]")) {
     document.querySelector("#import-dialog").showModal();
   }
@@ -3795,6 +3952,8 @@ document.addEventListener("click", (event) => {
     const action = actionButton.dataset.action;
     if (action === "generate-selected-requirements") {
       generateRequirements(selectedIdsOrWarn());
+    } else if (action === "bulk-approve-content") {
+      bulkApproveContent();
     } else if (action === "generate-selected-directions") {
       generateDirections(selectedIdsOrWarn());
     } else if (action === "select-requirement-drafts") {
@@ -4131,6 +4290,7 @@ document.querySelector("#open-import-button").addEventListener("click", () => {
 });
 document.querySelector("#import-form").addEventListener("submit", previewImport);
 document.querySelector("#commit-import-button").addEventListener("click", commitImport);
+document.querySelector("#content-form").addEventListener("submit", submitPoemContent);
 document.querySelector("#source-form").addEventListener("submit", submitPoemSource);
 document.querySelector("#rework-form").addEventListener("submit", submitRework);
 document.querySelector("#compare-selected-button").addEventListener("click", openComparison);

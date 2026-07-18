@@ -63,7 +63,7 @@ GENERATED_DIR = DATA_DIR / "generated"
 STATE_FILE = DATA_DIR / "state.json"
 POEMS_FILE = DATA_DIR / "poems.json"
 STYLES_FILE = DATA_DIR / "styles.json"
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 
 DEFAULT_PROJECT_ID = "tang-poems-baseline"
 DECISION_VALUES = {"candidate", "selected", "rejected", "final"}
@@ -2406,6 +2406,38 @@ class StudioHandler(BaseHTTPRequestHandler):
                 self._send_json({"source": source})
             except WorkflowError as exc:
                 self._send_workflow_error(exc)
+            return
+        content_revision = re.fullmatch(
+            r"/api/poems/([a-z0-9-]{3,80})/content/revisions", path
+        )
+        if content_revision:
+            try:
+                body = self._read_json()
+                result = get_sop_store().revise_poem_content(
+                    content_revision.group(1),
+                    body.get("content"),
+                    actor=body.get("actor"),
+                )
+                self._send_json(result, HTTPStatus.CREATED)
+            except WorkflowError as exc:
+                self._send_workflow_error(exc)
+            return
+        if path == "/api/poems/content/bulk-approve":
+            try:
+                body = self._read_json()
+                result = get_sop_store().bulk_approve_content(
+                    body.get("poem_ids") or [],
+                    actor=body.get("actor"),
+                )
+                self._send_json(result)
+            except (WorkflowError, TypeError) as exc:
+                if isinstance(exc, WorkflowError):
+                    self._send_workflow_error(exc)
+                else:
+                    self._send_json(
+                        {"code": "INVALID_PAYLOAD", "message": "请求字段格式无效。"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
             return
         content_approval = re.fullmatch(
             r"/api/poems/([a-z0-9-]{3,80})/content/approve", path

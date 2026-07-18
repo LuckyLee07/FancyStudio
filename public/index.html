@@ -169,6 +169,9 @@
                 </div>
                 <div class="selection-actions">
                   <span id="selection-count">未选择</span>
+                  <button class="approve-button" data-action="bulk-approve-content" data-role-allow="content_editor,producer,system_admin" type="button">
+                    批准内容
+                  </button>
                   <button class="secondary-button" data-action="generate-selected-requirements" type="button">
                     生成需求
                   </button>
@@ -652,6 +655,33 @@
             <button class="primary-button" id="commit-import-button" type="button" disabled>确认导入</button>
           </div>
         </footer>
+      </form>
+    </dialog>
+
+    <dialog class="detail-dialog" id="content-dialog">
+      <form class="dialog-shell" id="content-form">
+        <header>
+          <div><p class="eyebrow">VERSIONED POEM CONTENT</p><h2 id="content-dialog-title">修订诗词内容</h2></div>
+          <button class="icon-button" type="button" data-close-dialog aria-label="关闭">×</button>
+        </header>
+        <input type="hidden" name="poem_id" />
+        <div class="dialog-body form-stack">
+          <div class="import-guidance"><strong>保存会创建新的 ContentVersion</strong><p>旧内容、需求、方向、任务和成品继续保留用于追溯；当前需求与方向会退出新排产。存在未结束生成任务时系统会阻止修订。</p></div>
+          <div class="dialog-columns">
+            <label><span>诗名</span><input class="dialog-input" name="title" maxlength="120" required /></label>
+            <label><span>作者</span><input class="dialog-input" name="author" maxlength="80" required /></label>
+          </div>
+          <div class="dialog-columns">
+            <label><span>朝代</span><input class="dialog-input" name="dynasty" maxlength="20" required /></label>
+            <label><span>题材</span><input class="dialog-input" name="theme" maxlength="80" required /></label>
+          </div>
+          <label><span>正文 <small>每行一句</small></span><textarea class="dialog-textarea content-lines-input" name="lines" rows="7" required></textarea></label>
+          <label><span>情绪</span><input class="dialog-input" name="mood" maxlength="200" required /></label>
+          <label><span>核心意象 <small>每行一项</small></span><textarea class="dialog-textarea" name="imagery" rows="4" required></textarea></label>
+          <label><span>自有整理备注</span><textarea class="dialog-textarea" name="notes" rows="4" maxlength="2000"></textarea></label>
+          <label><span>本次修订原因</span><textarea class="dialog-textarea" name="change_summary" rows="3" minlength="3" maxlength="500" placeholder="例如：依据内容编辑复核，修正分行并补齐题材与意象。" required></textarea></label>
+        </div>
+        <footer><span>新版本需重新批准后才能生成需求；不会覆盖任何历史版本。</span><div><button class="secondary-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit" data-role-allow="content_editor,producer,system_admin">保存内容版本</button></div></footer>
       </form>
     </dialog>
 

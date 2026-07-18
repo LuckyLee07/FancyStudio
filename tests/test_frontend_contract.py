@@ -196,6 +196,33 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("data-quality-panel", styles)
         self.assertIn("poem-source-summary", styles)
 
+    def test_content_revision_quality_drilldown_and_bulk_approval_are_visible(self):
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in ("content-dialog", "content-form", "content-dialog-title"):
+            self.assertIn(f'id="{element_id}"', html)
+        for field in (
+            "title",
+            "author",
+            "dynasty",
+            "lines",
+            "theme",
+            "mood",
+            "imagery",
+            "notes",
+            "change_summary",
+        ):
+            self.assertIn(f'name="{field}"', html)
+        self.assertIn('data-action="bulk-approve-content"', html)
+        self.assertIn("openContentDialog", script)
+        self.assertIn("submitPoemContent", script)
+        self.assertIn("bulkApproveContent", script)
+        self.assertIn("data-edit-poem-content", script)
+        self.assertIn("quality-record-list", styles)
+        self.assertIn("content-version-history", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -719,6 +719,79 @@ class TangPoemStudioTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(approved["poem"]["status"], "requirement_draft")
 
+    def test_content_revision_and_bulk_approval_api(self):
+        status, revised = self.request_json(
+            "/api/poems/chun-xiao/content/revisions",
+            method="POST",
+            payload={
+                "content": {
+                    "title": "春晓",
+                    "author": "孟浩然",
+                    "dynasty": "唐",
+                    "lines": ["春眠不觉晓", "处处闻啼鸟", "夜来风雨声", "花落知多少"],
+                    "theme": "惜春与晨景",
+                    "mood": "清新、惋惜",
+                    "imagery": ["春眠", "啼鸟", "风雨", "落花"],
+                    "notes": "内容编辑完成分行与意象复核。",
+                    "change_summary": "补充惜春语义与复核记录",
+                },
+                "actor": {"id": "editor-api", "role": "content_editor"},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(revised["content_version"]["version"], 2)
+        self.assertEqual(revised["poem"]["status"], "content_review")
+
+        status, premature = self.request_json(
+            "/api/requirements/generate",
+            method="POST",
+            payload={
+                "project_id": server.SOP_DEFAULT_PROJECT_ID,
+                "poem_ids": ["chun-xiao"],
+                "actor": {"id": "editor-api", "role": "content_editor"},
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(premature["results"][0]["code"], "APPROVED_CONTENT_REQUIRED")
+
+        status, bulk = self.request_json(
+            "/api/poems/content/bulk-approve",
+            method="POST",
+            payload={
+                "poem_ids": ["chun-xiao", "jing-ye-si"],
+                "actor": {"id": "editor-api", "role": "content_editor"},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(bulk["succeeded"], 1)
+        self.assertEqual(bulk["failed"], 1)
+
+        status, detail = self.request_json("/api/poems/chun-xiao")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["content_versions"][0]["status"], "approved")
+        self.assertTrue(detail["content_versions"][0]["source_version_id"])
+
+        status, forbidden = self.request_json_error(
+            "/api/poems/shan-xing/content/revisions",
+            method="POST",
+            payload={
+                "content": {
+                    "title": "山行",
+                    "author": "杜牧",
+                    "dynasty": "唐",
+                    "lines": ["远上寒山石径斜", "白云生处有人家"],
+                    "theme": "山林秋色",
+                    "mood": "明丽",
+                    "imagery": ["寒山", "白云"],
+                    "notes": "测试",
+                    "change_summary": "越权修订测试",
+                },
+                "actor": {"id": "art-api", "role": "art_director"},
+            },
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(forbidden["code"], "CONTENT_ROLE_REQUIRED")
+
     def test_batch_api_runs_persistent_tasks_and_writes_review_candidates(self):
         actor = {"id": "producer-api", "role": "producer"}
         _, generated = self.request_json(

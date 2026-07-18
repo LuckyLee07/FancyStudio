@@ -944,6 +944,168 @@ class SopStoreTests(unittest.TestCase):
         approved = self.store.approve_content("test-source-gate-poem", actor=self.actor)
         self.assertEqual(approved["status"], "requirement_draft")
 
+    def test_content_revision_snapshots_fields_and_invalidates_current_plans(self):
+        self.ready_poem("jing-ye-si")
+        before = self.store.poem_detail("jing-ye-si")
+        original_content = before["content_versions"][0]
+        self.assertEqual(original_content["version"], 1)
+        self.assertEqual(original_content["title"], "静夜思")
+        self.assertTrue(original_content["source_version_id"])
+
+        updated_source = self.store.update_poem_source(
+            "jing-ye-si",
+            {
+                "source_type": "public_domain",
+                "citation": "公共领域底本，完成标点与分行复核",
+                "license": "Public Domain",
+                "verification_status": "verified",
+                "verified_at": "2026-07-18",
+            },
+            actor=self.actor,
+        )
+        source_only = self.store.poem_detail("jing-ye-si")
+        self.assertEqual(
+            source_only["content_versions"][0]["source"], original_content["source"]
+        )
+
+        revised = self.store.revise_poem_content(
+            "jing-ye-si",
+            {
+                "title": "静夜思",
+                "author": "李白",
+                "dynasty": "唐",
+                "lines": ["床前明月光", "疑是地上霜", "举头望明月", "低头思故乡"],
+                "theme": "思乡与月夜",
+                "mood": "清冷、克制、思乡",
+                "imagery": ["明月", "霜色", "旅舍"],
+                "notes": "内容编辑完成原文、分行与核心意象复核。",
+                "change_summary": "补齐内容元数据并修订题材标签",
+            },
+            actor=self.actor,
+        )
+        self.assertEqual(revised["content_version"]["version"], 2)
+        self.assertEqual(revised["content_version"]["source_version_id"], updated_source["id"])
+        self.assertEqual(revised["poem"]["status"], "content_review")
+        self.assertEqual(revised["invalidated"], {"requirements": 1, "directions": 3})
+        detail = self.store.poem_detail("jing-ye-si")
+        self.assertEqual(len(detail["content_versions"]), 2)
+        self.assertEqual(detail["content_versions"][1]["theme"], original_content["theme"])
+        self.assertFalse(any(item["is_current"] for item in detail["requirements"]))
+        self.assertFalse(any(item["is_current"] for item in detail["directions"]))
+
+        blocked_generation = self.store.generate_requirements(
+            DEFAULT_PROJECT_ID, ["jing-ye-si"], actor=self.actor
+        )
+        self.assertEqual(blocked_generation["results"][0]["code"], "APPROVED_CONTENT_REQUIRED")
+        self.assertEqual(
+            next(item for item in self.store.list_poems()["items"] if item["id"] == "jing-ye-si")["status"],
+            "content_review",
+        )
+
+        approved = self.store.approve_content("jing-ye-si", actor=self.actor)
+        self.assertEqual(approved["status"], "requirement_draft")
+        generated = self.store.generate_requirements(
+            DEFAULT_PROJECT_ID, ["jing-ye-si"], actor=self.actor
+        )
+        requirement = next(
+            item
+            for item in self.store.requirements()
+            if item["id"] == generated["results"][0]["requirement_id"]
+        )
+        self.assertEqual(requirement["content_version_id"], revised["content_version"]["id"])
+        self.assertEqual(requirement["content"]["theme"], "思乡与月夜")
+
+        self.store.decide_requirement(requirement["id"], "approve", actor=self.actor)
+        art_actor = {"id": "art-01", "role": "art_director"}
+        direction_result = self.store.generate_directions(
+            DEFAULT_PROJECT_ID, ["jing-ye-si"], actor=art_actor
+        )
+        direction_id = direction_result["results"][0]["direction_ids"][0]
+        self.store.decide_direction(direction_id, "approve", actor=art_actor)
+        batch = self.store.create_batch(
+            DEFAULT_PROJECT_ID,
+            ["jing-ye-si"],
+            direction_ids=[direction_id],
+            style_id="ink-whitespace",
+            aspect_ratio="portrait",
+            count_per_direction=1,
+            provider="demo",
+            model="demo-renderer",
+            unit_cost=0,
+            actor={"id": "producer-01", "role": "producer"},
+        )
+        task = self.store.tasks(batch_id=batch["id"])[0]
+        self.assertEqual(task["prompt"]["poem"]["title"], "静夜思")
+        self.assertEqual(task["prompt"]["poem"]["theme"], "思乡与月夜")
+        self.assertEqual(
+            task["prompt"]["poem"]["content_version_id"],
+            revised["content_version"]["id"],
+        )
+        self.assertEqual(task["prompt"]["poem"]["source_version_id"], updated_source["id"])
+        self.assertTrue(
+            any(item["action"] == "content.revised" for item in self.store.audit_events())
+        )
+
+    def test_content_revision_blocks_active_tasks_and_bulk_approval_is_partial(self):
+        direction_id = self.ready_poem("lu-zhai")
+        self.store.create_batch(
+            DEFAULT_PROJECT_ID,
+            ["lu-zhai"],
+            direction_ids=[direction_id],
+            style_id="ink-whitespace",
+            aspect_ratio="portrait",
+            count_per_direction=1,
+            provider="demo",
+            model="demo-renderer",
+            unit_cost=0,
+            actor=self.actor,
+        )
+        current = self.store.poem_detail("lu-zhai")["content_versions"][0]
+        with self.assertRaises(WorkflowError) as active:
+            self.store.revise_poem_content(
+                "lu-zhai",
+                {
+                    "title": current["title"],
+                    "author": current["author"],
+                    "dynasty": current["dynasty"],
+                    "lines": current["lines"],
+                    "theme": current["theme"],
+                    "mood": current["mood"],
+                    "imagery": current["imagery"],
+                    "notes": current["notes"] + " 已复核。",
+                    "change_summary": "尝试在活动任务期间修订",
+                },
+                actor=self.actor,
+            )
+        self.assertEqual(active.exception.code, "CONTENT_REVISION_ACTIVE_TASKS")
+
+        for poem_id in ("chun-xiao", "jiang-xue"):
+            content = self.store.poem_detail(poem_id)["content_versions"][0]
+            self.store.revise_poem_content(
+                poem_id,
+                {
+                    "title": content["title"],
+                    "author": content["author"],
+                    "dynasty": content["dynasty"],
+                    "lines": content["lines"],
+                    "theme": content["theme"],
+                    "mood": content["mood"],
+                    "imagery": content["imagery"],
+                    "notes": content["notes"] + " 内容复核完成。",
+                    "change_summary": "补充内容复核记录",
+                },
+                actor=self.actor,
+            )
+        bulk = self.store.bulk_approve_content(
+            ["chun-xiao", "jiang-xue", "jing-ye-si"], actor=self.actor
+        )
+        self.assertEqual(bulk["succeeded"], 2)
+        self.assertEqual(bulk["failed"], 1)
+        self.assertEqual(
+            next(item for item in bulk["results"] if item["poem_id"] == "jing-ye-si")["code"],
+            "INVALID_CONTENT_STATE",
+        )
+
     def test_batch_estimate_execution_attempts_and_partial_failure(self):
         direction_id = self.ready_poem()
         estimate = self.store.estimate_batch(

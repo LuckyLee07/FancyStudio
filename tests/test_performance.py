@@ -67,7 +67,14 @@ class ProductionScaleTests(unittest.TestCase):
                     generation_run_id = f"dir_run_scale_{index:04d}"
                     direction_ids.append(direction_id)
                     poem_row = connection.execute(
-                        "SELECT lines_json FROM poems WHERE id = ?",
+                        """
+                        SELECT p.lines_json, cv.id AS content_version_id
+                        FROM poems p
+                        JOIN content_versions cv ON cv.poem_id = p.id
+                        WHERE p.id = ?
+                        ORDER BY cv.version DESC
+                        LIMIT 1
+                        """,
                         (poem_id,),
                     ).fetchone()
                     poem_lines = json.loads(poem_row["lines_json"])
@@ -130,9 +137,9 @@ class ProductionScaleTests(unittest.TestCase):
                         INSERT INTO requirements(
                             id, poem_id, instruction_id, version, is_current,
                             content_json, status, created_by, approved_by,
-                            created_at, updated_at
+                            created_at, updated_at, content_version_id
                         ) VALUES (?, ?, ?, 1, 1, ?, 'approved', 'scale-fixture',
-                                  'scale-fixture', ?, ?)
+                                  'scale-fixture', ?, ?, ?)
                         """,
                         (
                             requirement_id,
@@ -148,6 +155,7 @@ class ProductionScaleTests(unittest.TestCase):
                             ),
                             now,
                             now,
+                            poem_row["content_version_id"],
                         ),
                     )
                     connection.execute(

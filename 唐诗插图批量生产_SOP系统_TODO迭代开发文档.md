@@ -1,9 +1,9 @@
 # 唐诗插图批量生产 SOP 系统｜TODO 迭代开发文档
 
-> 文档版本：v1.7
+> 文档版本：v1.8
 > 编写日期：2026-07-18
 > 产品目标：面向内容生产团队，批量完成《唐诗三百首》插图的策划、生成、审核、返工、交付与归档
-> 当前代码基线：本地实施版 `v0.13.0`
+> 当前代码基线：本地实施版 `v0.14.0`
 > 文档状态：持续迭代中；以任务状态和自动化测试为准
 
 ---
@@ -351,7 +351,7 @@ flowchart LR
 |---|---|---|
 | ProductionProject | id、name、brief、audience、spec、deadline、status | 一次完整生产项目 |
 | PoemRecord | id、title、author、dynasty、text、source、tags、status | 诗词主记录 |
-| ContentVersion | poem_id、text、notes、source、version、approved_by | 已校对内容版本 |
+| ContentVersion | poem_id、title、author、dynasty、text、theme、mood、imagery、notes、source_version_id、version、status、change_summary、approved_by | 与来源版本绑定的不可变完整内容快照 |
 | InstructionVersion | scope、content、version、status、published_at | 全局 / 项目 AI 指令 |
 | RequirementCard | poem_id、content、must_have、avoid、risks、status、version | 结构化插图需求 |
 | DirectionProposal | requirement_id、type、scene、composition、palette、status | 可审核画面方向 |
@@ -570,7 +570,9 @@ flowchart LR
 - [x] `GET /api/poems`：分页、筛选、排序；
 - [x] `GET /api/poems/:id`：读取内容、需求、方向、任务、候选、返工、终审、导出和审计的全链路详情；
 - [x] `POST /api/poems/:id/source`：新增不可变来源版本并记录授权、核验人与核验日期；
+- [x] `POST /api/poems/:id/content/revisions`：创建新的完整 ContentVersion，保留历史并让当前需求 / 方向退出新排产；活动生成任务未结束时拒绝修订；
 - [x] `POST /api/poems/:id/content/approve`：批准内容版本。
+- [x] `POST /api/poems/content/bulk-approve`：逐诗批准当前内容版本，返回成功、失败和失败原因。
 
 ### 10.2 指令、需求和方向
 
@@ -666,11 +668,14 @@ flowchart LR
 - [x] BE 建立 SQLite、Migration、Repository 和 AuditEvent；
 - [x] BE 实现诗词导入预检、冲突报告和事务导入；
 - [x] BE 实现诗词、内容版本、项目汇总 API；
+- [x] BE 将内容版本升级为完整不可变快照，并实现来源版本冻结、修订审计、下游当前版本失效和活动任务写保护；
 - [x] FE 重构一级导航和总览；
 - [x] FE 实现诗词表格、筛选、多选和状态徽标；
+- [x] FE 实现数据质量问题下钻、内容修订表单、版本历史和批量内容审批；
 - [x] FE 实现需求板交互、批量审核与侧栏编辑；
 - [ ] CE 清洗 300 首基础字段，标记数据来源和缺失项；
 - [x] QA 覆盖重复导入、缺字段、正文冲突、来源更新、防降级、回滚和分页；
+- [x] QA 覆盖内容快照不可变、修订后需求 / 方向失效、未批准内容拦截、Prompt 冻结新版本、活动任务修订锁和批量审批部分失败；
 - [ ] QA 验证现有图像与项目数据迁移不丢失。
 
 **退出条件：**
@@ -796,10 +801,13 @@ flowchart LR
 - [x] E01-T05 实现诗词分页、筛选和批量状态查询；
 - [x] E01-T06 迁移当前 12 首基准样例诗词；
 - [x] E01-T07 建立面向 300 首目标的数据质量报告；当前报告已可定位数量缺口、字段覆盖和来源阻塞，实际 300 首语料清洗仍由 CE 任务承接。
+- [x] E01-T08 建立内容纠错闭环：质量问题下钻、完整 ContentVersion 快照、来源版本冻结、内容修订历史、当前需求 / 方向失效、活动任务修订锁与批量内容审批。
 
 **验收：** 相同文件重复导入不产生重复诗词；正文冲突不会被静默覆盖。
 
 **v0.13.0 验收证据：** `schemas/poem-import.schema.json`、JSON / CSV 下载模板、`poem_sources` 不可变版本链、来源核验与授权门禁、资源页“300 首数据就绪度”报告、导入预检质量摘要，以及 `tests/test_poem_import_schema.py`、数据层与 HTTP API 回归；全量 83 项自动化测试通过。旧格式可以进入预检，但来源文本不会被静默视为已核验；已进入生产的诗词不能通过导入降低来源可信状态。
+
+**v0.14.0 验收证据：** ContentVersion 已扩展为诗名、作者、朝代、正文、题材、情绪、意象、备注和来源版本的完整不可变快照；资源页质量问题可直接进入内容 / 来源修订，单诗详情展示版本链和修订说明；新内容批准前不能重新生成需求，批准后的 Requirement、Direction 与 Prompt 均冻结新 ContentVersion 和 SourceVersion；存在活动生成任务时拒绝上游修订，批量内容审批按诗返回部分失败。数据层、HTTP API、前端契约、300 首 / 1000 任务性能门禁和真实浏览器闭环均已验证，全量 87 项自动化测试通过。
 
 ### EPIC-02：需求与方向审批
 

@@ -2837,6 +2837,82 @@ input[type="checkbox"] {
   border-color: rgba(101, 213, 160, 0.14);
 }
 
+.quality-record-list {
+  display: grid;
+  max-height: 260px;
+  margin-top: 10px;
+  gap: 6px;
+  overflow: auto;
+}
+
+.quality-record-list article {
+  display: grid;
+  padding: 8px;
+  gap: 7px;
+  grid-template-columns: minmax(110px, 1fr) minmax(120px, 1.2fr) auto;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.018);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.quality-record-list article.is-blocking {
+  border-color: rgba(239, 113, 128, 0.2);
+}
+
+.quality-record-list article > button {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  gap: 2px;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.quality-record-list article > button strong,
+.quality-record-list article > button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quality-record-list article > button strong {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.quality-record-list article > button small {
+  color: var(--faint);
+  font-size: 7px;
+}
+
+.quality-record-list article > div,
+.quality-record-list aside {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.quality-record-list article > div span {
+  padding: 3px 5px;
+  color: var(--muted);
+  background: var(--red-soft);
+  border-radius: 99px;
+  font-size: 7px;
+}
+
+.quality-record-list aside {
+  justify-content: flex-end;
+}
+
+.quality-record-list aside button {
+  padding: 2px;
+  border: 0;
+}
+
 .budget-panel h3 {
   margin: 0;
 }
@@ -3751,6 +3827,76 @@ input[type="checkbox"] {
   min-height: 27px;
   padding: 0 8px;
   font-size: 7px;
+}
+
+.content-version-summary {
+  display: grid;
+  padding: 8px;
+  gap: 7px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  background: rgba(92, 205, 222, 0.055);
+  border: 1px solid rgba(92, 205, 222, 0.12);
+  border-radius: 7px;
+}
+
+.content-version-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.content-version-summary strong {
+  color: var(--text-soft);
+  font-size: 8px;
+}
+
+.content-version-summary small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-version-summary button {
+  min-height: 27px;
+  padding: 0 8px;
+  font-size: 7px;
+}
+
+.content-change-note {
+  color: var(--muted) !important;
+}
+
+.content-version-history {
+  display: flex;
+  margin: 8px 0;
+  gap: 5px;
+  overflow-x: auto;
+}
+
+.content-version-history span {
+  display: grid;
+  min-width: 78px;
+  padding: 5px 7px;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.content-version-history span.is-current {
+  border-color: rgba(92, 205, 222, 0.22);
+}
+
+.content-version-history strong {
+  color: var(--cyan);
+  font-family: ui-monospace, monospace;
+  font-size: 8px;
+}
+
+.content-lines-input {
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  line-height: 1.8;
 }
 
 .poem-chain-metrics strong {
